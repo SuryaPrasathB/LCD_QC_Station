@@ -1,8 +1,9 @@
-from PyQt5.QtWidgets import QMainWindow, QLabel, QVBoxLayout, QWidget, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QMessageBox
 from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QPixmap, QImage
 
 from camera.worker import CameraWorker
+from .video_label import VideoLabel
 
 class MainWindow(QMainWindow):
     def __init__(self, camera_impl):
@@ -26,9 +27,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
 
         # Label for Camera Feed
-        self.image_label = QLabel("Initializing Camera...")
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("QLabel { background-color: black; color: white; border: 1px solid #444; }")
+        self.image_label = VideoLabel("Initializing Camera...")
 
         # Add to layout
         layout.addWidget(self.image_label)
@@ -41,17 +40,11 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(QImage)
     def update_image(self, q_img):
-        """Updates the label with the new frame, scaling it to fit."""
-        # Scale the image to fit the label while maintaining aspect ratio
+        """Updates the label with the new frame."""
+        # Convert QImage to QPixmap and pass to the custom label
+        # The label handles scaling in its paintEvent, preventing resize loops
         pixmap = QPixmap.fromImage(q_img)
-
-        # Get current label size
-        w = self.image_label.width()
-        h = self.image_label.height()
-
-        # Scale
-        scaled_pixmap = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled_pixmap)
+        self.image_label.set_frame(pixmap)
 
     @pyqtSlot(str)
     def handle_error(self, error_msg):
