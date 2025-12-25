@@ -152,3 +152,44 @@ class RealCamera(CameraInterface):
 
     def is_running(self) -> bool:
         return self._running
+
+    def capture_still(self, output_path: str) -> None:
+        """
+        Captures a still image using rpicam-still.
+        Stops the live stream if it is running to free the camera resource.
+        """
+        # Ensure live stream is stopped to release camera
+        if self._running:
+            print("[RealCamera] Stopping live stream before capture...")
+            self.stop()
+
+        # rpicam-still capture command
+        # -t 2000: 2 second warmup for AWB/AE convergence
+        # --width/height: 8MP limit (safe for Pi 3B)
+        cmd = [
+            "rpicam-still",
+            "-o", output_path,
+            "-t", "2000",
+            "--width", "3280",
+            "--height", "2464",
+            "--nopreview"
+        ]
+
+        print(f"[RealCamera] Running capture: {' '.join(cmd)}")
+
+        try:
+            # Run blocking command
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+            print("[RealCamera] Capture successful.")
+        except subprocess.CalledProcessError as e:
+            print(f"[RealCamera] Capture failed: {e.stderr}")
+            raise RuntimeError(f"rpicam-still failed: {e.stderr}")
+        except Exception as e:
+            print(f"[RealCamera] Capture error: {e}")
+            raise e
