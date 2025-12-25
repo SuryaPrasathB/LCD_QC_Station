@@ -166,9 +166,13 @@ class RealCamera(CameraInterface):
         # rpicam-still capture command
         # -t 2000: 2 second warmup for AWB/AE convergence
         # --width/height: 8MP limit (safe for Pi 3B)
+        # --autofocus-mode auto: Ensure AF runs
         cmd = [
             "rpicam-still",
             "-o", output_path,
+            "--autofocus-mode", "auto",
+            "--autofocus-range", "normal",
+            "--autofocus-speed", "normal",
             "-t", "2000",
             "--width", "3280",
             "--height", "2464",
