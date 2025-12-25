@@ -50,3 +50,27 @@ class MockCamera(CameraInterface):
 
     def is_running(self) -> bool:
         return self._running
+
+    def capture_still(self, output_path: str) -> None:
+        """Simulates capturing a high-resolution image."""
+        print(f"[MockCamera] Capturing still to {output_path}...")
+
+        # Simulate shutter delay (1 second)
+        time.sleep(1.0)
+
+        # Create a higher resolution dummy image (e.g. 1920x1080)
+        h, w = 1080, 1920
+        img = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+
+        # Add details
+        cv2.putText(img, "MOCK STILL CAPTURE", (100, 200), cv2.FONT_HERSHEY_SIMPLEX,
+                    2, (0, 0, 255), 4)
+        cv2.putText(img, f"Timestamp: {time.time()}", (100, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (255, 255, 255), 2)
+
+        # Save to disk
+        success = cv2.imwrite(output_path, img)
+        if not success:
+            raise RuntimeError(f"Failed to save mock capture to {output_path}")
+
+        print(f"[MockCamera] Saved mock capture.")

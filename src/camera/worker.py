@@ -59,3 +59,22 @@ class CameraWorker(QThread):
         self.quit()
         self.wait()
         self.camera.stop()
+
+class CaptureWorker(QThread):
+    """
+    Worker thread for performing the blocking still capture operation.
+    """
+    finished = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, camera, output_path):
+        super().__init__()
+        self.camera = camera
+        self.output_path = output_path
+
+    def run(self):
+        try:
+            self.camera.capture_still(self.output_path)
+            self.finished.emit()
+        except Exception as e:
+            self.error_occurred.emit(str(e))

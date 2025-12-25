@@ -32,3 +32,13 @@ class CameraInterface(ABC):
     def is_running(self) -> bool:
         """Check if the camera is currently running."""
         pass
+
+    @abstractmethod
+    def capture_still(self, output_path: str) -> None:
+        """
+        Capture a high-resolution still image to the specified path.
+
+        Args:
+            output_path (str): The file path to save the image to.
+        """
+        pass
