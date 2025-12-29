@@ -157,10 +157,10 @@ class RealCamera(CameraInterface):
 
             if rgb_frame is not None:
                 # Convert RGB to BGR for OpenCV saving
-                bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+                #bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
 
                 # Save to disk
-                success = cv2.imwrite(output_path, bgr_frame)
+                success = cv2.imwrite(output_path, rgb_frame)
                 if not success:
                     raise IOError(f"Failed to write image to {output_path}")
                 print("[RealCamera] Capture successful.")
