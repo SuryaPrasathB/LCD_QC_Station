@@ -13,6 +13,9 @@ from camera.worker import CameraWorker, CaptureWorker
 from .video_label import VideoLabel
 from roi import ROIManager
 from core.inspection import perform_inspection
+from core.dataset import DatasetManager, OverrideRecord
+import uuid
+from datetime import datetime
 
 class AppState(Enum):
     LIVE_VIEW = auto()
@@ -26,23 +29,21 @@ class MainWindow(QMainWindow):
         self.capture_worker = None
         self.current_state = None
 
+        # Dataset Manager
+        self.dataset_manager = DatasetManager(".")
+        self.dataset_manager.initialize()
+
         # ROI Manager
-        # We assume main.py is in src/, but project root is parent of src?
-        # Let's check where main.py is running from.
-        # Usually standard is execution from root.
-        # But based on file list, main.py is in src/main.py or root?
-        # List files showed main.py in src/.
-        # The requirements said "roi.json should live in the project root directory, alongside main.py."
-        # If main.py is in src/, then root is src/.
-        # However, typically project root is one level up.
-        # Let's assume '.' works relative to CWD.
-        self.roi_manager = ROIManager(".")
+        self.roi_manager = ROIManager(self.dataset_manager)
 
         # Temp storage for ROI selection before saving
         self.temp_roi_rect = None
 
         # Cache for ROI data to avoid reading disk in Live View loop
         self.cached_roi_data = None
+
+        # Inspection Context
+        self.last_inspection_context = None
 
         # Initial load of ROI
         self.refresh_roi_cache()
@@ -54,7 +55,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("Camera Live View")
-        self.resize(800, 600)
+        self.resize(800, 750)
 
         # Central Widget
         central_widget = QWidget()
@@ -105,8 +106,35 @@ class MainWindow(QMainWindow):
         self.lbl_inspection_score = QLabel("Score: -")
         status_layout.addWidget(self.lbl_inspection_score)
 
+        # Override Buttons
+        self.btn_mark_pass = QPushButton("Mark as PASS")
+        self.btn_mark_pass.clicked.connect(lambda: self.handle_override(True))
+        self.btn_mark_pass.setEnabled(False)
+        status_layout.addWidget(self.btn_mark_pass)
+
+        self.btn_mark_fail = QPushButton("Mark as FAIL")
+        self.btn_mark_fail.clicked.connect(lambda: self.handle_override(False))
+        self.btn_mark_fail.setEnabled(False)
+        status_layout.addWidget(self.btn_mark_fail)
+
         status_layout.addStretch() # Push labels to left
         layout.addLayout(status_layout)
+
+        # Learning Panel
+        learning_layout = QHBoxLayout()
+
+        self.lbl_pending_count = QLabel("Pending Overrides: 0")
+        learning_layout.addWidget(self.lbl_pending_count)
+
+        self.btn_commit_learning = QPushButton("Commit Learning")
+        self.btn_commit_learning.clicked.connect(self.handle_commit_learning)
+        learning_layout.addWidget(self.btn_commit_learning)
+
+        learning_layout.addStretch()
+        layout.addLayout(learning_layout)
+
+        # Refresh pending count
+        self.update_pending_count()
 
     def set_state(self, state: AppState):
         self.current_state = state
@@ -119,6 +147,10 @@ class MainWindow(QMainWindow):
             self.btn_set_roi.setEnabled(False)
             self.btn_clear_roi.setEnabled(False)
 
+            # Disable Override Buttons
+            self.btn_mark_pass.setEnabled(False)
+            self.btn_mark_fail.setEnabled(False)
+
             # Disable selection interactivity
             self.image_label.set_selection_enabled(False)
 
@@ -126,6 +158,8 @@ class MainWindow(QMainWindow):
             self.lbl_inspection_result.setText("Result: N/A")
             self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: black;")
             self.lbl_inspection_score.setText("Score: -")
+
+            self.last_inspection_context = None
 
             self.start_live_view()
 
@@ -217,24 +251,52 @@ class MainWindow(QMainWindow):
         try:
             # cv2.imread loads as BGR, which is what we want for inspection core
             captured_img = cv2.imread(capture_path)
-            reference_img = cv2.imread(self.roi_manager.get_reference_path())
+            reference_path = self.roi_manager.get_reference_path()
+            if not reference_path:
+                 raise ValueError("No reference image found.")
+
+            reference_img = cv2.imread(reference_path)
 
             if captured_img is None:
                 print(f"Error loading captured image: {capture_path}")
                 return
             if reference_img is None:
-                print(f"Error loading reference image: {self.roi_manager.get_reference_path()}")
+                print(f"Error loading reference image: {reference_path}")
                 return
 
             result = perform_inspection(captured_img, reference_img, roi_data)
+
+            # Generate ID and Record
+            insp_id = str(uuid.uuid4())
+
+            # Save to dataset (persisted inspection)
+            # We assume capture_path is the source
+            final_path = self.dataset_manager.record_inspection(
+                insp_id,
+                capture_path,
+                {"passed": result.passed, "score": result.score, "roi": roi_data}
+            )
+
+            # Store context for overrides
+            self.last_inspection_context = {
+                "id": insp_id,
+                "passed": result.passed,
+                "score": result.score,
+                "image_path": final_path,
+                "roi": [roi_data['x'], roi_data['y'], roi_data['width'], roi_data['height']]
+            }
 
             # Update UI
             if result.passed:
                 self.lbl_inspection_result.setText("PASS")
                 self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: green;")
+                self.btn_mark_fail.setEnabled(True) # Can override to FAIL
+                self.btn_mark_pass.setEnabled(False)
             else:
                 self.lbl_inspection_result.setText("FAIL")
                 self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+                self.btn_mark_pass.setEnabled(True) # Can override to PASS
+                self.btn_mark_fail.setEnabled(False)
 
             self.lbl_inspection_score.setText(f"Score: {result.score:.2f}")
 
@@ -242,6 +304,64 @@ class MainWindow(QMainWindow):
             print(f"Inspection error: {e}")
             self.lbl_inspection_result.setText("Error")
             self.lbl_inspection_score.setText(f"Err: {str(e)}")
+
+    def handle_override(self, new_result: bool):
+        if not self.last_inspection_context:
+            return
+
+        ctx = self.last_inspection_context
+
+        # Prevent double override? No, user might change mind.
+        # But we create a new record each time?
+        # Requirement: "Append-only". Yes.
+
+        record = OverrideRecord(
+            inspection_id=ctx["id"],
+            original_result=ctx["passed"],
+            overridden_result=new_result,
+            score=ctx["score"],
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            image_path=ctx["image_path"],
+            roi=ctx["roi"]
+        )
+
+        self.dataset_manager.save_override(record)
+        self.update_pending_count()
+
+        # Visual feedback
+        if new_result:
+             self.lbl_inspection_result.setText("PASS (Overridden)")
+             self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: green;")
+             self.btn_mark_pass.setEnabled(False)
+             self.btn_mark_fail.setEnabled(True)
+        else:
+             self.lbl_inspection_result.setText("FAIL (Overridden)")
+             self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+             self.btn_mark_fail.setEnabled(False)
+             self.btn_mark_pass.setEnabled(True)
+
+        QMessageBox.information(self, "Override Saved", f"Result marked as {'PASS' if new_result else 'FAIL'}.")
+
+    def handle_commit_learning(self):
+        count = self.dataset_manager.get_pending_count()
+        if count == 0:
+            QMessageBox.information(self, "Learning", "No pending items to commit.")
+            return
+
+        success, msg = self.dataset_manager.commit_learning()
+        if success:
+            QMessageBox.information(self, "Learning Committed", msg)
+            self.update_pending_count()
+            # Reload ROI manager since active version changed?
+            # ROIManager delegates to DatasetManager which tracks active version.
+            # But we might want to refresh cache.
+            self.refresh_roi_cache()
+        else:
+            QMessageBox.warning(self, "Learning Error", msg)
+
+    def update_pending_count(self):
+        count = self.dataset_manager.get_pending_count()
+        self.lbl_pending_count.setText(f"Pending Overrides: {count}")
 
     def on_capture_error(self, error_msg):
         # Show error
