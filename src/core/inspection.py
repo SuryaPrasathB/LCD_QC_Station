@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
@@ -7,93 +7,110 @@ from skimage.metrics import structural_similarity as ssim
 @dataclass
 class InspectionResult:
     passed: bool
-    score: float
+    score: float  # Deprecated or alias for best_score? We'll keep it for now.
+    best_score: float
+    best_reference_id: str
+    all_scores: Dict[str, float]
+    dataset_version: str
     heatmap: Optional[np.ndarray] = None
 
 def perform_inspection(
     captured_img: np.ndarray,
-    reference_img: np.ndarray,
+    reference_images: Dict[str, np.ndarray],
     roi_coords: Dict[str, int],
-    threshold: float = 0.90
+    threshold: float,
+    dataset_version: str
 ) -> InspectionResult:
     """
-    Performs deterministic inspection by comparing the ROI of captured and reference images.
+    Performs deterministic inspection by comparing the ROI of captured image
+    against multiple reference images.
 
     Args:
         captured_img: HxWx3 BGR image (captured)
-        reference_img: HxWx3 BGR image (reference)
+        reference_images: Dictionary mapping reference_id (filename) to HxWx3 BGR image
         roi_coords: Dictionary containing x, y, width, height (relative to image dims)
-        threshold: SSIM score threshold for passing (default 0.90)
+        threshold: SSIM score threshold for passing
+        dataset_version: The version string of the active dataset
 
     Returns:
-        InspectionResult containing passed status, score, and optional heatmap.
+        InspectionResult containing passed status, best score, and other metadata.
     """
 
-    # 1. Validation of ROI
+    # 1. Validation of ROI (Captured Image)
     x, y, w, h = roi_coords['x'], roi_coords['y'], roi_coords['width'], roi_coords['height']
     img_h, img_w = captured_img.shape[:2]
-    ref_h, ref_w = reference_img.shape[:2]
-
-    # Check if images have compatible dimensions (or at least valid ROI)
-    # The requirement is "Use exact pixel coordinates".
-    # If dimensions mismatch, we should probably fail or handle it.
-    # For now, we assume the camera output is consistent (locked mode).
-    # But let's check ROI bounds.
 
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
         # ROI out of bounds for captured image
-        # This is a critical failure.
-        # Let's fail gracefully with score 0.
-        return InspectionResult(passed=False, score=0.0)
+        return InspectionResult(
+            passed=False,
+            score=0.0,
+            best_score=0.0,
+            best_reference_id="none",
+            all_scores={},
+            dataset_version=dataset_version,
+            heatmap=None
+        )
 
-    if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-        # ROI out of bounds for reference image
-        return InspectionResult(passed=False, score=0.0)
-
-    # 2. Extract ROI
-    # NumPy slicing: [y:y+h, x:x+w]
+    # Extract ROI from captured image
     roi_cap = captured_img[y:y+h, x:x+w]
-    roi_ref = reference_img[y:y+h, x:x+w]
-
-    # 3. Preprocessing
-    # Allowed: Grayscale, Gaussian blur (small kernel)
-
-    # Convert to Grayscale
     gray_cap = cv2.cvtColor(roi_cap, cv2.COLOR_BGR2GRAY)
-    gray_ref = cv2.cvtColor(roi_ref, cv2.COLOR_BGR2GRAY)
-
-    # Gaussian Blur (small kernel, e.g., 3x3 or 5x5)
-    # Standard deviation 0 means calculated from kernel size
     gray_cap = cv2.GaussianBlur(gray_cap, (5, 5), 0)
-    gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
-    # 4. Comparison Algorithm (SSIM)
-    # scikit-image ssim expects arrays.
-    # returns score, and optionally diff image (heatmap)
-    # data_range should be specified (255 for uint8)
+    scores: Dict[str, float] = {}
+    best_score: float = -1.0
+    best_ref_id: str = "none"
+    best_heatmap: Optional[np.ndarray] = None
 
-    score, diff = ssim(
-        gray_ref,
-        gray_cap,
-        data_range=255,
-        full=True
+    # 2. Iterate over all references
+    for ref_id, ref_img in reference_images.items():
+        ref_h, ref_w = ref_img.shape[:2]
+
+        # Check ROI bounds for this reference
+        if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+            # Skip invalid reference dimensions
+            scores[ref_id] = 0.0
+            continue
+
+        # Extract ROI
+        roi_ref = ref_img[y:y+h, x:x+w]
+
+        # Preprocessing
+        gray_ref = cv2.cvtColor(roi_ref, cv2.COLOR_BGR2GRAY)
+        gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
+
+        # Comparison Algorithm (SSIM)
+        score, diff = ssim(
+            gray_ref,
+            gray_cap,
+            data_range=255,
+            full=True
+        )
+
+        # Cast to float
+        score_val = float(score)
+        scores[ref_id] = score_val
+
+        if score_val > best_score:
+            best_score = score_val
+            best_ref_id = ref_id
+            # Normalize heatmap to 0-255
+            best_heatmap = ((diff + 1) / 2 * 255).astype(np.uint8)
+
+    # 3. Decision Rule
+    # If no valid references were processed (e.g. empty dict), fail.
+    if best_score == -1.0:
+        passed = False
+        best_score = 0.0
+    else:
+        passed = bool(best_score >= threshold)
+
+    return InspectionResult(
+        passed=passed,
+        score=best_score, # Keeping score as alias for best_score
+        best_score=best_score,
+        best_reference_id=best_ref_id,
+        all_scores=scores,
+        dataset_version=dataset_version,
+        heatmap=best_heatmap
     )
-
-    # diff is the structural similarity image.
-    # It is in range [-1, 1] theoretically, but practically [0, 1] for identical?
-    # Actually SSIM map can be negative?
-    # The diff map returned by full=True has the same shape as inputs.
-
-    # Convert diff to heatmap (0-255 uint8) for potential visualization
-    # The diff from ssim is the local SSIM value map.
-    # We might want the absolute difference or (1-ssim) for "heatmap".
-    # But for now, let's just store the raw diff map or a visualized version.
-    # Requirements: "Difference heatmap... Optional... toggleable"
-    # Let's normalize it to 0-255 for easy display later if needed.
-    # ssim map is typically -1 to 1.
-    heatmap = ((diff + 1) / 2 * 255).astype(np.uint8)
-
-    # 5. Output
-    passed = bool(score >= threshold)
-
-    return InspectionResult(passed=passed, score=float(score), heatmap=heatmap)

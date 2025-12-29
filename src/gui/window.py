@@ -240,8 +240,9 @@ class MainWindow(QMainWindow):
         Runs the deterministic inspection if valid ROI and Reference exist.
         """
         roi_data = self.cached_roi_data
+        ref_paths = self.dataset_manager.get_active_references()
 
-        if not roi_data or not self.roi_manager.has_reference():
+        if not roi_data or not ref_paths:
             self.lbl_inspection_result.setText("Setup Required")
             self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: orange;")
             self.lbl_inspection_score.setText("Score: -")
@@ -251,57 +252,84 @@ class MainWindow(QMainWindow):
         try:
             # cv2.imread loads as BGR, which is what we want for inspection core
             captured_img = cv2.imread(capture_path)
-            reference_path = self.roi_manager.get_reference_path()
-            if not reference_path:
-                 raise ValueError("No reference image found.")
-
-            reference_img = cv2.imread(reference_path)
-
             if captured_img is None:
                 print(f"Error loading captured image: {capture_path}")
                 return
-            if reference_img is None:
-                print(f"Error loading reference image: {reference_path}")
-                return
 
-            result = perform_inspection(captured_img, reference_img, roi_data)
+            # Load all reference images
+            reference_images = {}
+            for rp in ref_paths:
+                ref_img = cv2.imread(rp)
+                if ref_img is not None:
+                    reference_images[os.path.basename(rp)] = ref_img
+                else:
+                    print(f"Warning: Failed to load reference {rp}")
+
+            if not reference_images:
+                raise ValueError("No valid reference images loaded.")
+
+            dataset_version = self.dataset_manager.active_version
+
+            # Default threshold 0.90 for now, could be loaded from config/dataset
+            threshold = 0.90
+
+            result = perform_inspection(
+                captured_img,
+                reference_images,
+                roi_data,
+                threshold,
+                dataset_version
+            )
 
             # Generate ID and Record
             insp_id = str(uuid.uuid4())
+
+            # Log data
+            log_data = {
+                "passed": result.passed,
+                "score": result.best_score,
+                "best_reference": result.best_reference_id,
+                "all_scores": result.all_scores,
+                "roi": roi_data,
+                "threshold": threshold,
+                "dataset_version": dataset_version
+            }
 
             # Save to dataset (persisted inspection)
             # We assume capture_path is the source
             final_path = self.dataset_manager.record_inspection(
                 insp_id,
                 capture_path,
-                {"passed": result.passed, "score": result.score, "roi": roi_data}
+                log_data
             )
 
             # Store context for overrides
             self.last_inspection_context = {
                 "id": insp_id,
                 "passed": result.passed,
-                "score": result.score,
+                "score": result.best_score,
                 "image_path": final_path,
                 "roi": [roi_data['x'], roi_data['y'], roi_data['width'], roi_data['height']]
             }
 
             # Update UI
             if result.passed:
-                self.lbl_inspection_result.setText("PASS")
+                self.lbl_inspection_result.setText(f"PASS")
                 self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: green;")
                 self.btn_mark_fail.setEnabled(True) # Can override to FAIL
                 self.btn_mark_pass.setEnabled(False)
             else:
-                self.lbl_inspection_result.setText("FAIL")
+                self.lbl_inspection_result.setText(f"FAIL")
                 self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
                 self.btn_mark_pass.setEnabled(True) # Can override to PASS
                 self.btn_mark_fail.setEnabled(False)
 
-            self.lbl_inspection_score.setText(f"Score: {result.score:.2f}")
+            self.lbl_inspection_score.setText(f"Score: {result.best_score:.2f}\nRef: {result.best_reference_id}\nVer: {dataset_version}")
 
         except Exception as e:
             print(f"Inspection error: {e}")
+            import traceback
+            traceback.print_exc()
             self.lbl_inspection_result.setText("Error")
             self.lbl_inspection_score.setText(f"Err: {str(e)}")
 
