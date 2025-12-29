@@ -2,13 +2,17 @@ from enum import Enum, auto
 import os
 import sys
 
-from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QWidget, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton, QWidget, QMessageBox, QLabel
 from PyQt5.QtCore import Qt, pyqtSlot, QRect
 from PyQt5.QtGui import QPixmap, QImage
+
+import cv2
+import numpy as np
 
 from camera.worker import CameraWorker, CaptureWorker
 from .video_label import VideoLabel
 from roi import ROIManager
+from core.inspection import perform_inspection
 
 class AppState(Enum):
     LIVE_VIEW = auto()
@@ -91,6 +95,19 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(roi_layout)
 
+        # Inspection Status Panel
+        status_layout = QHBoxLayout()
+
+        self.lbl_inspection_result = QLabel("Result: N/A")
+        self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px;")
+        status_layout.addWidget(self.lbl_inspection_result)
+
+        self.lbl_inspection_score = QLabel("Score: -")
+        status_layout.addWidget(self.lbl_inspection_score)
+
+        status_layout.addStretch() # Push labels to left
+        layout.addLayout(status_layout)
+
     def set_state(self, state: AppState):
         self.current_state = state
 
@@ -104,6 +121,11 @@ class MainWindow(QMainWindow):
 
             # Disable selection interactivity
             self.image_label.set_selection_enabled(False)
+
+            # Clear inspection status in live view
+            self.lbl_inspection_result.setText("Result: N/A")
+            self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: black;")
+            self.lbl_inspection_score.setText("Score: -")
 
             self.start_live_view()
 
@@ -160,7 +182,8 @@ class MainWindow(QMainWindow):
 
     def on_capture_finished(self):
         # 4. Load and display image
-        pixmap = QPixmap("/tmp/capture.jpg")
+        capture_path = "/tmp/capture.jpg"
+        pixmap = QPixmap(capture_path)
         if not pixmap.isNull():
             self.image_label.set_frame(pixmap)
 
@@ -172,8 +195,53 @@ class MainWindow(QMainWindow):
 
             # 5. Update State
             self.set_state(AppState.CAPTURED)
+
+            # 6. Perform Inspection
+            self.run_inspection(capture_path)
         else:
             self.on_capture_error("Failed to load captured image.")
+
+    def run_inspection(self, capture_path: str):
+        """
+        Runs the deterministic inspection if valid ROI and Reference exist.
+        """
+        roi_data = self.cached_roi_data
+
+        if not roi_data or not self.roi_manager.has_reference():
+            self.lbl_inspection_result.setText("Setup Required")
+            self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: orange;")
+            self.lbl_inspection_score.setText("Score: -")
+            return
+
+        # Load images
+        try:
+            # cv2.imread loads as BGR, which is what we want for inspection core
+            captured_img = cv2.imread(capture_path)
+            reference_img = cv2.imread(self.roi_manager.get_reference_path())
+
+            if captured_img is None:
+                print(f"Error loading captured image: {capture_path}")
+                return
+            if reference_img is None:
+                print(f"Error loading reference image: {self.roi_manager.get_reference_path()}")
+                return
+
+            result = perform_inspection(captured_img, reference_img, roi_data)
+
+            # Update UI
+            if result.passed:
+                self.lbl_inspection_result.setText("PASS")
+                self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: green;")
+            else:
+                self.lbl_inspection_result.setText("FAIL")
+                self.lbl_inspection_result.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+
+            self.lbl_inspection_score.setText(f"Score: {result.score:.2f}")
+
+        except Exception as e:
+            print(f"Inspection error: {e}")
+            self.lbl_inspection_result.setText("Error")
+            self.lbl_inspection_score.setText(f"Err: {str(e)}")
 
     def on_capture_error(self, error_msg):
         # Show error
@@ -255,10 +323,17 @@ class MainWindow(QMainWindow):
             current_h
         )
 
+        # Save current capture as reference
+        # We are in CAPTURED state, so the image is at /tmp/capture.jpg
+        if self.roi_manager.save_reference("/tmp/capture.jpg"):
+            msg = "Region of Interest and Reference Image saved successfully."
+        else:
+            msg = "Region of Interest saved, but failed to save Reference Image."
+
         # Clear temp
         self.temp_roi_rect = None
 
-        QMessageBox.information(self, "ROI Saved", "Region of Interest saved successfully.")
+        QMessageBox.information(self, "ROI Saved", msg)
 
         # Reload to cache and apply
         self.refresh_roi_cache()
