@@ -1,153 +1,137 @@
-import subprocess
 import shutil
+import subprocess
 import cv2
 import numpy as np
 import threading
-import os
+import time
 from .interface import CameraInterface
+
+# Import Picamera2.
+# Note: This will fail in environments where picamera2 is not installed unless mocked.
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    Picamera2 = None
 
 class RealCamera(CameraInterface):
     """
-    Implementation of CameraInterface using rpicam-vid (libcamera-vid).
-    Captures MJPEG stream from stdout.
+    Implementation of CameraInterface using Picamera2.
+    Configures a dual-stream pipeline:
+      - 'lores': 640x480 YUV420 for live preview (fast)
+      - 'main':  3280x2464 RGB888 for still capture (high res)
+    Ensures identical framing via locked ScalerCrop.
     """
 
-    def __init__(self, width=640, height=480, fps=15):
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self._running = False
-        self.process = None
-        self.latest_frame = None
+    def __init__(self):
+        """
+        Initialize the camera instance.
+        """
+        if Picamera2 is None:
+            raise ImportError("Picamera2 library is not installed.")
+
+        self.picam2 = Picamera2()
         self.lock = threading.Lock()
-        self.thread = None
+        self._running = False
+
+        # Canonical configuration values
+        self.main_config = {"size": (3280, 2464), "format": "RGB888"}
+        self.lores_config = {"size": (640, 480), "format": "YUV420"}
 
     @staticmethod
     def check_camera_availability() -> bool:
         """
-        Checks if a camera is available using `rpicam-still --list-cameras`.
+        Checks if a camera is available using `libcamera-hello --list-cameras`.
         Returns True if a camera is found, False otherwise.
         """
-        if not shutil.which("rpicam-still"):
-            return False
+        if not shutil.which("libcamera-hello"):
+            # Fallback for systems where libcamera-hello might be missing but rpicam-still exists
+            # (though we are removing rpicam usage, checking existence is harmless)
+             if not shutil.which("rpicam-still"):
+                 return False
+             cmd_base = "rpicam-still"
+        else:
+            cmd_base = "libcamera-hello"
 
         try:
             # Run the list command
             result = subprocess.run(
-                ["rpicam-still", "--list-cameras"],
+                [cmd_base, "--list-cameras"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=5
             )
 
-            # Check for success and keywords in output
-            # Usually output contains "Available cameras" or lists index 0, 1 etc.
-            # If no cameras, it usually prints "No cameras available" or returns non-zero.
             if result.returncode == 0 and "Available cameras" in result.stdout:
                 return True
             return False
         except Exception as e:
-            print(f"Error checking camera: {e}")
+            print(f"[RealCamera] Error checking camera: {e}")
             return False
 
     def start(self) -> None:
+        """
+        Configures and starts the Picamera2 instance with dual streams.
+        Locks the geometry to the full sensor FOV.
+        """
         if self._running:
             return
 
-        cmd = [
-            "rpicam-vid",
-            "--inline", # Headers with every I-frame
-            "--nopreview",
-            "--codec", "mjpeg",
-            "--width", str(self.width),
-            "--height", str(self.height),
-            "--framerate", str(self.fps),
-            "--timeout", "0", # Run indefinitely
-            "--output", "-"   # Output to stdout
-        ]
+        print("[RealCamera] Configuring dual streams...")
 
-        print(f"[RealCamera] Starting: {' '.join(cmd)}")
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, # Avoid deadlock if buffer fills
-                bufsize=10**6 # Large buffer
-            )
-            self._running = True
-            self.thread = threading.Thread(target=self._update, daemon=True)
-            self.thread.start()
-        except Exception as e:
-            print(f"[RealCamera] Failed to start process: {e}")
-            self._running = False
+        # Configure the camera with two streams
+        config = self.picam2.create_still_configuration(
+            main=self.main_config,
+            lores=self.lores_config,
+            display="lores"
+        )
+        self.picam2.configure(config)
+        self.picam2.start()
+
+        # Lock the ScalarCrop to the full sensor resolution to ensure identical FOV
+        # for both streams (preventing digital zoom or aspect ratio crop mismatches).
+        full_res = self.picam2.camera_properties["PixelArraySize"]
+        self.picam2.set_controls({
+            "ScalerCrop": [0, 0, full_res[0], full_res[1]]
+        })
+
+        self._running = True
+        print("[RealCamera] Started.")
 
     def stop(self) -> None:
-        self._running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
+        """
+        Stops the camera and releases resources.
+        """
+        if not self._running:
+            return
 
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
+        print("[RealCamera] Stopping...")
+        self.picam2.stop()
+        # self.picam2.close() # Picamera2 usually stays open, but stop is enough.
+        self._running = False
         print("[RealCamera] Stopped.")
 
-    def _update(self):
-        """
-        Internal loop to read from stdout and decode MJPEG frames.
-        """
-        buffer = b""
-        chunk_size = 4096
-
-        while self._running and self.process and self.process.poll() is None:
-            try:
-                chunk = self.process.stdout.read(chunk_size)
-                if not chunk:
-                    break
-                buffer += chunk
-
-                while True:
-                    # Find JPEG Start of Image (SOI)
-                    a = buffer.find(b'\xff\xd8')
-                    if a == -1:
-                        # Keep the last few bytes just in case split happens exactly at marker
-                        if len(buffer) > 4:
-                            buffer = buffer[-4:]
-                        break
-
-                    # Find JPEG End of Image (EOI) starting after SOI
-                    b = buffer.find(b'\xff\xd9', a)
-                    if b == -1:
-                        # Not yet received the end
-                        break
-
-                    # Extract the full JPEG frame
-                    jpg_data = buffer[a:b+2]
-                    buffer = buffer[b+2:] # Move past this frame
-
-                    # Decode to OpenCV image
-                    # Use numpy frombuffer -> cv2.imdecode for speed
-                    try:
-                        data = np.frombuffer(jpg_data, dtype=np.uint8)
-                        frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
-                        if frame is not None:
-                            with self.lock:
-                                self.latest_frame = frame
-                    except Exception as e:
-                        print(f"[RealCamera] Decode error: {e}")
-
-            except Exception as e:
-                print(f"[RealCamera] Stream error: {e}")
-                break
-
     def get_frame(self) -> np.ndarray:
-        with self.lock:
-            if self.latest_frame is not None:
-                return self.latest_frame.copy()
+        """
+        Retrieves the latest frame from the 'lores' stream for preview.
+        Converts YUV420 -> BGR.
+        """
+        if not self._running:
+            return None
+
+        try:
+            with self.lock:
+                # Capture from the low-res preview stream (fast)
+                # YUV420 comes as I420 (Planar Y, U, V)
+                yuv_frame = self.picam2.capture_array("lores")
+
+            if yuv_frame is not None:
+                # Convert I420 YUV to BGR
+                return cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR_I420)
+
+        except Exception as e:
+            print(f"[RealCamera] get_frame error: {e}")
+
         return None
 
     def is_running(self) -> bool:
@@ -155,45 +139,33 @@ class RealCamera(CameraInterface):
 
     def capture_still(self, output_path: str) -> None:
         """
-        Captures a still image using rpicam-still.
-        Stops the live stream if it is running to free the camera resource.
+        Captures a high-resolution still from the 'main' stream.
+        Converts RGB888 -> BGR and saves to disk.
+        Does NOT stop the live stream.
         """
-        # Ensure live stream is stopped to release camera
-        if self._running:
-            print("[RealCamera] Stopping live stream before capture...")
-            self.stop()
+        if not self._running:
+            raise RuntimeError("Camera is not running.")
 
-        # rpicam-still capture command
-        # -t 2000: 2 second warmup for AWB/AE convergence
-        # --width/height: 8MP limit (safe for Pi 3B)
-        # --autofocus-mode auto: Ensure AF runs
-        cmd = [
-            "rpicam-still",
-            "-o", output_path,
-            "--autofocus-mode", "auto",
-            "--autofocus-range", "normal",
-            "--autofocus-speed", "normal",
-            "-t", "2000",
-            "--width", "3280",
-            "--height", "2464",
-            "--nopreview"
-        ]
-
-        print(f"[RealCamera] Running capture: {' '.join(cmd)}")
+        print(f"[RealCamera] Capturing still to {output_path}...")
 
         try:
-            # Run blocking command
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True
-            )
-            print("[RealCamera] Capture successful.")
-        except subprocess.CalledProcessError as e:
-            print(f"[RealCamera] Capture failed: {e.stderr}")
-            raise RuntimeError(f"rpicam-still failed: {e.stderr}")
+            with self.lock:
+                # Capture from the high-res main stream
+                # Picamera2 returns RGB888 for 'main' as configured
+                rgb_frame = self.picam2.capture_array("main")
+
+            if rgb_frame is not None:
+                # Convert RGB to BGR for OpenCV saving
+                bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+
+                # Save to disk
+                success = cv2.imwrite(output_path, bgr_frame)
+                if not success:
+                    raise IOError(f"Failed to write image to {output_path}")
+                print("[RealCamera] Capture successful.")
+            else:
+                raise RuntimeError("Captured frame was None")
+
         except Exception as e:
-            print(f"[RealCamera] Capture error: {e}")
+            print(f"[RealCamera] Capture failed: {e}")
             raise e

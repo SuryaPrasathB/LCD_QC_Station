@@ -43,12 +43,33 @@ def main():
 
             sys.exit(0)
 
-    # 3. Launch Main Window
+    # 3. Start Camera (Lifecycle Rule: Start once at app start)
+    if camera:
+        print("Starting Camera...")
+        try:
+            camera.start()
+        except Exception as e:
+            print(f"Failed to start camera: {e}")
+            # Depending on policy, we might exit or continue.
+            # Continuing allows GUI to show error state if handled, but we'll print.
+
+    # 4. Launch Main Window
     window = MainWindow(camera)
     window.show()
 
-    # 4. Run Event Loop
-    sys.exit(app.exec_())
+    # 5. Run Event Loop
+    ret = app.exec_()
+
+    # 6. Stop Camera (Lifecycle Rule: Stop once at app exit)
+    # Note: MainWindow.closeEvent also handles this, but strictly main.py should own it
+    # if we started it here. However, window.closeEvent is cleaner for GUI apps.
+    # We will rely on window.closeEvent or explicit stop here.
+    # To be safe and explicit as per requirements:
+    if camera and camera.is_running():
+        print("Stopping Camera...")
+        camera.stop()
+
+    sys.exit(ret)
 
 if __name__ == "__main__":
     main()

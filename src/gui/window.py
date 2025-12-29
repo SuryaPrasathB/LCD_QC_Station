@@ -277,10 +277,17 @@ class MainWindow(QMainWindow):
         # Could show a message box if critical, but for live stream usually just log
 
     def closeEvent(self, event):
+        # Stop worker threads
         if self.worker:
-            self.image_label.setText("Stopping Camera...")
+            self.image_label.setText("Stopping Preview...")
             self.worker.stop()
         if self.capture_worker and self.capture_worker.isRunning():
             self.capture_worker.quit()
             self.capture_worker.wait()
+
+        # Explicitly stop the camera hardware as per lifecycle requirements
+        # (Though main.py also has a stop, doing it here ensures it stops when window closes)
+        if self.camera_impl and self.camera_impl.is_running():
+            self.camera_impl.stop()
+
         event.accept()

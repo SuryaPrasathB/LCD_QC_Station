@@ -21,7 +21,7 @@ class CameraWorker(QThread):
         """
         Main loop of the thread.
         """
-        self.camera.start()
+        # Camera is started globally in main.py, not here.
 
         while self._running:
             try:
@@ -58,7 +58,7 @@ class CameraWorker(QThread):
         self._running = False
         self.quit()
         self.wait()
-        self.camera.stop()
+        # Do NOT stop the camera here. Lifecycle is managed by main/window.
 
 class CaptureWorker(QThread):
     """
