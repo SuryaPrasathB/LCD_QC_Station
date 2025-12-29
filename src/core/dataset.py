@@ -106,6 +106,33 @@ class DatasetManager:
 
         return roi_path, ref_path
 
+    def get_active_references(self) -> List[str]:
+        """
+        Returns a list of all valid reference image paths in the active version.
+        Excludes roi.json and meta.json.
+        """
+        v_path = self.get_active_version_path()
+        if not os.path.exists(v_path):
+            return []
+
+        valid_exts = {".png", ".jpg", ".jpeg"}
+        excluded_files = {"roi.json", "meta.json"}
+
+        refs = []
+        try:
+            for f in os.listdir(v_path):
+                if f in excluded_files:
+                    continue
+
+                ext = os.path.splitext(f)[1].lower()
+                if ext in valid_exts:
+                    refs.append(os.path.join(v_path, f))
+        except Exception as e:
+            print(f"Error listing references in {v_path}: {e}")
+            return []
+
+        return sorted(refs)
+
     def save_inspection(self, inspection_id: str, image: bytes, result_data: Dict) -> str:
         """
         Saves inspection image and result JSON.
