@@ -94,6 +94,6 @@ def perform_inspection(
     heatmap = ((diff + 1) / 2 * 255).astype(np.uint8)
 
     # 5. Output
-    passed = score >= threshold
+    passed = bool(score >= threshold)
 
     return InspectionResult(passed=passed, score=float(score), heatmap=heatmap)
