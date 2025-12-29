@@ -270,15 +270,16 @@ class MainWindow(QMainWindow):
 
             dataset_version = self.dataset_manager.active_version
 
-            # Default threshold 0.90 for now, could be loaded from config/dataset
-            threshold = 0.90
+            # Feature-based threshold (0.25) as per Step 7 requirements
+            threshold = 0.25
 
             result = perform_inspection(
                 captured_img,
                 reference_images,
                 roi_data,
                 threshold,
-                dataset_version
+                dataset_version,
+                method="orb"
             )
 
             # Generate ID and Record
