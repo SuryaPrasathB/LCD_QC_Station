@@ -92,7 +92,8 @@ class RealCamera(CameraInterface):
         # for both streams (preventing digital zoom or aspect ratio crop mismatches).
         full_res = self.picam2.camera_properties["PixelArraySize"]
         self.picam2.set_controls({
-            "ScalerCrop": [0, 0, full_res[0], full_res[1]]
+            "ScalerCrop": [0, 0, full_res[0], full_res[1]],
+            "AfMode": 2  # Continuous autofocus
         })
 
         self._running = True
