@@ -1,15 +1,21 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTableWidget,
-    QTableWidgetItem, QHeaderView, QGroupBox
+    QTableWidgetItem, QHeaderView, QGroupBox, QHBoxLayout, QPushButton
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 class ResultsPanel(QWidget):
+    # Signals for overrides
+    override_pass = pyqtSignal()
+    override_fail = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.lbl_status = None
         self.lbl_meta = None
         self.table = None
+        self.btn_pass = None
+        self.btn_fail = None
         self.init_ui()
 
     def init_ui(self):
@@ -47,6 +53,25 @@ class ResultsPanel(QWidget):
         table_group.setLayout(table_layout)
         layout.addWidget(table_group)
 
+        # Override Controls
+        override_group = QGroupBox("Operator Override")
+        override_layout = QHBoxLayout()
+
+        self.btn_pass = QPushButton("Mark PASS")
+        self.btn_pass.setStyleSheet("background-color: #388e3c; color: white;") # Greenish
+        self.btn_pass.clicked.connect(self.override_pass.emit)
+        self.btn_pass.setEnabled(False)
+
+        self.btn_fail = QPushButton("Mark FAIL")
+        self.btn_fail.setStyleSheet("background-color: #d32f2f; color: white;") # Reddish
+        self.btn_fail.clicked.connect(self.override_fail.emit)
+        self.btn_fail.setEnabled(False)
+
+        override_layout.addWidget(self.btn_pass)
+        override_layout.addWidget(self.btn_fail)
+        override_group.setLayout(override_layout)
+        layout.addWidget(override_group)
+
     def update_results(self, result: dict):
         """Updates the panel with inspection results."""
         if not result:
@@ -56,11 +81,19 @@ class ResultsPanel(QWidget):
             self.table.setRowCount(0)
             self.style().unpolish(self.lbl_status)
             self.style().polish(self.lbl_status)
+            self.set_buttons_enabled(False)
             return
 
         # Update Global Status
         passed = result.get("passed", False)
-        self.lbl_status.setText("PASS" if passed else "FAIL")
+
+        # Check if already overridden in result data (if server updates it)
+        is_overridden = result.get("overridden", False)
+        status_text = "PASS" if passed else "FAIL"
+        if is_overridden:
+            status_text += " (OVR)"
+
+        self.lbl_status.setText(status_text)
         self.lbl_status.setObjectName("result_pass" if passed else "result_fail")
 
         # Force style refresh
@@ -90,6 +123,10 @@ class ResultsPanel(QWidget):
             self.table.setItem(row, 0, item_id)
             self.table.setItem(row, 1, item_status)
             self.table.setItem(row, 2, item_score)
+
+    def set_buttons_enabled(self, enabled: bool):
+        self.btn_pass.setEnabled(enabled)
+        self.btn_fail.setEnabled(enabled)
 
     def clear(self):
         self.update_results({})

@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog
 )
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent
 from pc_client.api.inspection_api import InspectionClient
 from pc_client.ui.live_view import LiveView
 from pc_client.ui.results_panel import ResultsPanel
@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self.client = InspectionClient()
         self.setup_mode_active = False
         self.inspection_pending = False
+        self.current_inspection_id = None # Store ID for overrides
 
         # Worker pool to prevent GC
         self.active_workers = set()
@@ -134,6 +135,8 @@ class MainWindow(QMainWindow):
 
         # Results Panel
         self.results_panel = ResultsPanel()
+        self.results_panel.override_pass.connect(lambda: self.trigger_override("pass"))
+        self.results_panel.override_fail.connect(lambda: self.trigger_override("fail"))
         right_layout.addWidget(self.results_panel)
 
         main_layout.addLayout(right_layout, stretch=1)
@@ -149,10 +152,36 @@ class MainWindow(QMainWindow):
         if worker in self.active_workers:
             self.active_workers.remove(worker)
 
+    def closeEvent(self, event):
+        # Stop timers
+        self.live_timer.stop()
+        self.result_timer.stop()
+
+        # Stop polling workers if active
+        if self.frame_worker and self.frame_worker.isRunning():
+            self.frame_worker.wait(500)
+            self.frame_worker.terminate()
+
+        if self.result_worker and self.result_worker.isRunning():
+            self.result_worker.wait(500)
+            self.result_worker.terminate()
+
+        # Wait for all task workers
+        # We can iterate over copy because threads remove themselves from set
+        for worker in list(self.active_workers):
+            if worker.isRunning():
+                worker.wait(500)
+                # Force kill if stuck (e.g. network timeout)
+                if worker.isRunning():
+                    worker.terminate()
+
+        super().closeEvent(event)
+
     def apply_state(self, connected: bool):
         self.ctrl_group.setEnabled(connected)
         self.txt_ip.setEnabled(not connected)
         self.txt_port.setEnabled(not connected)
+        self.results_panel.set_buttons_enabled(connected and self.current_inspection_id is not None)
 
         if connected:
             self.btn_connect.setText("Disconnect")
@@ -203,8 +232,6 @@ class MainWindow(QMainWindow):
 
             self.frame_worker = ApiWorker(self.client.get_live_frame, with_rois=True)
             self.frame_worker.result_ready.connect(self.update_live_view)
-            # We don't add polling workers to active_workers set to avoid churn,
-            # but we hold a reference in self.frame_worker
             self.frame_worker.start()
         except Exception: # pylint: disable=broad-exception-caught
             pass
@@ -222,16 +249,6 @@ class MainWindow(QMainWindow):
             self.btn_setup.setText("Setup ROI")
 
     def on_roi_drawn(self, x, y, w, h):
-        # Fetch current list size to suggest ID (in worker or main? Fetching is blocking)
-        # Using a worker to fetch list first would be robust but complex callback chain.
-        # User is waiting for dialog. I'll just use a generic default and let user type.
-        # Or better: I can't block UI to fetch list.
-        # I will assume "new_roi" or user enters it.
-        # Requirement: "Auto-generate ROI ID (roi_1, roi_2, …)"
-        # I'll just use a timestamp or random suffix if I don't know the count?
-        # No, I should respect the sequence.
-        # I'll fire a worker to get the list, THEN show dialog?
-        # Yes.
         worker = self.start_worker(self.client.get_roi_list)
         worker.result_ready.connect(lambda rois: self.prompt_roi_name(rois, x, y, w, h))
 
@@ -254,12 +271,16 @@ class MainWindow(QMainWindow):
 
     def start_inspection(self):
         self.results_panel.clear()
+        self.current_inspection_id = None
+        self.results_panel.set_buttons_enabled(False)
+
         worker = self.start_worker(self.client.start_inspection)
         worker.result_ready.connect(self.on_inspection_started)
         worker.error_occurred.connect(lambda e: QMessageBox.warning(self, "Error", f"Busy: {e}"))
 
-    def on_inspection_started(self, insp_id): # pylint: disable=unused-argument
+    def on_inspection_started(self, insp_id):
         self.inspection_pending = True
+        self.current_inspection_id = insp_id
         self.result_timer.start()
 
     def poll_inspection_result(self):
@@ -268,21 +289,15 @@ class MainWindow(QMainWindow):
 
         self.result_worker = ApiWorker(self.client.get_inspection_result)
         self.result_worker.result_ready.connect(self.on_inspection_result)
-        # We handle error (e.g. 404 not found yet)
         self.result_worker.error_occurred.connect(self.on_poll_error)
         self.result_worker.start()
 
     def on_poll_error(self, err_msg):
-        # If 404, maybe not ready? But API raises 404 if "No inspection found".
-        # If we just started one, it should eventually exist?
-        # Or maybe start_inspection failed silently?
-        # We just keep polling for a bit or until user cancels?
-        # For now, we just ignore errors and keep polling (or stop after max retries).
         pass
 
     def on_inspection_result(self, result):
-        # We got a result.
         self.results_panel.update_results(result)
+        self.results_panel.set_buttons_enabled(True) # Enable override buttons
         self.result_timer.stop()
         self.inspection_pending = False
         self.fetch_inspection_frame()
@@ -290,3 +305,10 @@ class MainWindow(QMainWindow):
     def fetch_inspection_frame(self):
         worker = self.start_worker(self.client.get_inspection_frame)
         worker.result_ready.connect(self.update_live_view)
+
+    def trigger_override(self, action):
+        if not self.current_inspection_id:
+            return
+
+        worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action)
+        worker.result_ready.connect(lambda: QMessageBox.information(self, "Override", f"Marked as {action.upper()}"))

@@ -10,7 +10,7 @@ import asyncio
 
 from camera.real_camera import RealCamera
 from camera.mock_camera import MockCamera
-from core.dataset import DatasetManager
+from core.dataset import DatasetManager, OverrideRecord
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
 
@@ -164,6 +164,54 @@ class ServerState:
             }
         finally:
             self.inspection_lock.release()
+
+    def override_inspection(self, inspection_id: str, action: str):
+        """
+        Records an override for a specific inspection.
+        Action: "pass" or "fail"
+        """
+        with self.lock:
+            last_res = self.last_inspection_result
+            if not last_res or last_res.get("inspection_id") != inspection_id:
+                raise Exception("Inspection not found or expired")
+
+            frame_path = self.last_inspection_frame_path
+            if not frame_path or not os.path.exists(frame_path):
+                raise Exception("Inspection frame missing")
+
+            current_rois = self.roi_data
+
+            # Original decision
+            original_passed = last_res.get("passed", False)
+
+            # New decision
+            new_passed = (action.lower() == "pass")
+
+            # Determine score (just use original global score or 0.0)
+            # We might not have global score easily available in last_inspection_result dict
+            # We can aggregate from roi_results
+            score = 0.0 # Placeholder
+            roi_results = last_res.get("roi_results", {})
+            if roi_results:
+                scores = [r["score"] for r in roi_results.values() if "score" in r]
+                if scores:
+                    score = min(scores)
+
+            record = OverrideRecord(
+                inspection_id=inspection_id,
+                original_result=original_passed,
+                overridden_result=new_passed,
+                score=score,
+                timestamp=datetime.utcnow().isoformat() + "Z",
+                image_path=frame_path,
+                roi=current_rois # Save the ROI definition used
+            )
+
+            self.dataset_manager.save_override(record)
+
+            # Update local result to reflect override (optional, but good for UI if we polled again)
+            self.last_inspection_result["overridden"] = True
+            self.last_inspection_result["override_status"] = "PASS" if new_passed else "FAIL"
 
     async def run_inspection_async(self) -> str:
         """

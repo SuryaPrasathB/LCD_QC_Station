@@ -77,3 +77,13 @@ class InspectionClient:
         resp = requests.get(f"{self.base_url}/inspection/frame", timeout=self.timeout)
         resp.raise_for_status()
         return resp.content
+
+    def override_inspection(self, inspection_id: str, action: str) -> Dict:
+        """POST /inspection/override"""
+        payload = {
+            "inspection_id": inspection_id,
+            "action": action
+        }
+        resp = requests.post(f"{self.base_url}/inspection/override", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
