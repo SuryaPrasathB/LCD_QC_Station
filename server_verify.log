@@ -1,0 +1,16 @@
+INFO:     Started server process [3976]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[Main] Server Starting...
+[Server] Starting in MOCK mode
+[Server] Starting Camera...
+[MockCamera] Started.
+INFO:     127.0.0.1:39854 - "POST /roi/set HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39868 - "GET /roi/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39870 - "GET /live/frame_with_rois HTTP/1.1" 200 OK
+[Server] Running inspection insp_2025_12_30_102208
+[MockCamera] Capturing still to /tmp/insp_insp_2025_12_30_102208.jpg...
+INFO:     127.0.0.1:39878 - "POST /inspection/start HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39886 - "POST /inspection/start HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:39892 - "POST /inspection/start HTTP/1.1" 409 Conflict
