@@ -1,0 +1,10 @@
+{
+  "model_version": "v2",
+  "input_size": [
+    128,
+    128
+  ],
+  "embedding_dim": 128,
+  "distance_metric": "cosine",
+  "trained_on_dataset": "reference/v2"
+}
