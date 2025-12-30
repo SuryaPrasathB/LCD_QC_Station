@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List, Any
 import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
@@ -12,329 +12,281 @@ logger = logging.getLogger(__name__)
 ORB_GATE_THRESHOLD = 0.50
 
 @dataclass
-class InspectionResult:
+class ROIResult:
+    roi_id: str
     passed: bool
-    score: float  # Deprecated or alias for best_score? We'll keep it for now.
     best_score: float
     best_reference_id: str
-    all_scores: Dict[str, float]
-    dataset_version: str
+    decision_path: str
+    all_scores: Dict[str, float] = field(default_factory=dict)
     heatmap: Optional[np.ndarray] = None
-    # STEP 9 additions
     orb_passed: Optional[bool] = None
     embedding_passed: Optional[bool] = None
-    decision_path: Optional[str] = None
+
+@dataclass
+class InspectionResult:
+    passed: bool
+    roi_results: Dict[str, ROIResult]
+    dataset_version: str
+    model_version: str = "v2" # Frozen embedding model version
+
+    # Legacy / Compatibility fields
+    score: float = 0.0          # Minimum score across ROIs
+    best_score: float = 0.0     # Same as score
+    best_reference_id: str = "" # Reference of the worst score ROI
+    all_scores: Dict[str, float] = field(default_factory=dict) # Flat dict?
+    heatmap: Optional[np.ndarray] = None # Heatmap of the worst ROI
+    orb_passed: Optional[bool] = None
+    embedding_passed: Optional[bool] = None
+    decision_path: Optional[str] = None # Aggregate path
 
 def _perform_ssim_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_coords: Dict[str, int],
+    roi_rect: Dict[str, int],
     threshold: float,
-    dataset_version: str
-) -> InspectionResult:
+) -> ROIResult:
     """
-    Legacy SSIM-based inspection.
+    Legacy SSIM-based inspection for a SINGLE ROI.
     """
-    # 1. Validation of ROI (Captured Image)
-    x, y, w, h = roi_coords['x'], roi_coords['y'], roi_coords['width'], roi_coords['height']
+    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
+    roi_id = roi_rect.get('id', 'unknown')
     img_h, img_w = captured_img.shape[:2]
 
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
-        # ROI out of bounds for captured image
-        return InspectionResult(
-            passed=False,
-            score=0.0,
-            best_score=0.0,
-            best_reference_id="none",
-            all_scores={},
-            dataset_version=dataset_version,
-            heatmap=None
-        )
+        return ROIResult(roi_id, False, 0.0, "none", "BOUNDS_ERROR")
 
-    # Extract ROI from captured image
     roi_cap = captured_img[y:y+h, x:x+w]
     gray_cap = cv2.cvtColor(roi_cap, cv2.COLOR_BGR2GRAY)
     gray_cap = cv2.GaussianBlur(gray_cap, (5, 5), 0)
 
-    scores: Dict[str, float] = {}
-    best_score: float = -1.0
-    best_ref_id: str = "none"
-    best_heatmap: Optional[np.ndarray] = None
+    scores = {}
+    best_score = -1.0
+    best_ref_id = "none"
+    best_heatmap = None
 
-    # 2. Iterate over all references
     for ref_id, ref_img in reference_images.items():
         ref_h, ref_w = ref_img.shape[:2]
-
-        # Check ROI bounds for this reference
-        if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-            # Skip invalid reference dimensions
-            scores[ref_id] = 0.0
+        # Skip if ref is smaller than ROI (should match since we cropped from it, but safe check)
+        if ref_h < h or ref_w < w:
             continue
 
-        # Extract ROI
-        roi_ref = ref_img[y:y+h, x:x+w]
+        # Detect legacy full-frame reference
+        # If ref is significantly larger than ROI, assume it's a full-frame image and crop it.
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop the reference using the ROI coordinates
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  # ROI outside reference bounds? Fallback to resize or skip
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode: Reference is already cropped
+             ref_roi = ref_img
 
-        # Preprocessing
-        gray_ref = cv2.cvtColor(roi_ref, cv2.COLOR_BGR2GRAY)
+        # Ensure exact size match for SSIM
+        if ref_roi.shape != roi_cap.shape:
+             ref_roi = cv2.resize(ref_roi, (w, h))
+
+        gray_ref = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY)
         gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
-        # Comparison Algorithm (SSIM)
-        score, diff = ssim(
-            gray_ref,
-            gray_cap,
-            data_range=255,
-            full=True
-        )
-
-        # Cast to float
+        score, diff = ssim(gray_ref, gray_cap, data_range=255, full=True)
         score_val = float(score)
         scores[ref_id] = score_val
 
         if score_val > best_score:
             best_score = score_val
             best_ref_id = ref_id
-            # Normalize heatmap to 0-255
             best_heatmap = ((diff + 1) / 2 * 255).astype(np.uint8)
 
-    # 3. Decision Rule
-    # If no valid references were processed (e.g. empty dict), fail.
     if best_score == -1.0:
         passed = False
         best_score = 0.0
     else:
         passed = bool(best_score >= threshold)
 
-    return InspectionResult(
+    return ROIResult(
+        roi_id=roi_id,
         passed=passed,
-        score=best_score, # Keeping score as alias for best_score
         best_score=best_score,
         best_reference_id=best_ref_id,
+        decision_path="SSIM_PASS" if passed else "SSIM_FAIL",
         all_scores=scores,
-        dataset_version=dataset_version,
         heatmap=best_heatmap
     )
 
 def _perform_orb_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_coords: Dict[str, int],
+    roi_rect: Dict[str, int],
     threshold: float,
-    dataset_version: str
-) -> InspectionResult:
+) -> ROIResult:
     """
-    Deterministic feature-based inspection using ORB.
+    ORB inspection for a SINGLE ROI.
     """
-    # 1. Validation of ROI (Captured Image)
-    x, y, w, h = roi_coords['x'], roi_coords['y'], roi_coords['width'], roi_coords['height']
+    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
+    roi_id = roi_rect.get('id', 'unknown')
+
+    # Extract ROI from Capture
     img_h, img_w = captured_img.shape[:2]
-
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
-        # ROI out of bounds for captured image
-        return InspectionResult(
-            passed=False,
-            score=0.0,
-            best_score=0.0,
-            best_reference_id="none",
-            all_scores={},
-            dataset_version=dataset_version,
-            heatmap=None
-        )
+         return ROIResult(roi_id, False, 0.0, "none", "BOUNDS_ERROR")
 
-    # Extract ROI from captured image
     roi_cap = captured_img[y:y+h, x:x+w]
     gray_cap = cv2.cvtColor(roi_cap, cv2.COLOR_BGR2GRAY)
     gray_cap = cv2.GaussianBlur(gray_cap, (5, 5), 0)
 
-    # ORB Parameters
-    # Fixed constants as per spec
     orb = cv2.ORB_create(nfeatures=500)
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     kp_cap, des_cap = orb.detectAndCompute(gray_cap, None)
 
+    # Debug Logging
+    print(f"DEBUG: ROI {roi_id}: Capture Features: {len(kp_cap) if kp_cap else 0}")
+
     if des_cap is None:
-        # No features in capture -> Fail
-        return InspectionResult(
-            passed=False,
-            score=0.0,
-            best_score=0.0,
-            best_reference_id="none",
-            all_scores={},
-            dataset_version=dataset_version,
-            heatmap=None
-        )
+        return ROIResult(roi_id, False, 0.0, "none", "ORB_NO_FEATURES")
 
-    scores: Dict[str, float] = {}
-    best_score: float = -1.0
-    best_ref_id: str = "none"
-    best_heatmap: Optional[np.ndarray] = None
+    scores = {}
+    best_score = -1.0
+    best_ref_id = "none"
+    best_heatmap = None
 
-    # 2. Iterate over all references
     for ref_id, ref_img in reference_images.items():
         ref_h, ref_w = ref_img.shape[:2]
 
-        # Check ROI bounds for this reference
-        if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-            scores[ref_id] = 0.0
-            continue
+        # Detect legacy full-frame reference
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode
+             ref_roi = ref_img
 
-        # Extract ROI
-        roi_ref = ref_img[y:y+h, x:x+w]
-
-        # Preprocessing
-        gray_ref = cv2.cvtColor(roi_ref, cv2.COLOR_BGR2GRAY)
+        gray_ref = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY)
         gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
-        # Feature Extraction (Reference)
         kp_ref, des_ref = orb.detectAndCompute(gray_ref, None)
+
+        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Features: {len(kp_ref) if kp_ref else 0}")
 
         if des_ref is None or len(des_ref) == 0:
             scores[ref_id] = 0.0
             continue
 
-        # Matching
         try:
             matches = bf.knnMatch(des_ref, des_cap, k=2)
-        except Exception:
-            # Should not happen if des_ref and des_cap are valid
+        except Exception as e:
+            print(f"DEBUG: ROI {roi_id}: ORB match error: {e}")
             scores[ref_id] = 0.0
             continue
 
-        # Ratio Test
         good = []
         for m_n in matches:
-            if len(m_n) != 2:
-                continue
+            if len(m_n) != 2: continue
             m, n = m_n
             if m.distance < 0.75 * n.distance:
                 good.append(m)
 
-        # Scoring
         denom = min(len(des_ref), len(des_cap))
-        if denom == 0:
-            score = 0.0
-        else:
-            score = len(good) / denom
-
+        score = len(good) / denom if denom > 0 else 0.0
         scores[ref_id] = score
+
+        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Score {score:.4f} ({len(good)} matches)")
 
         if score > best_score:
             best_score = score
             best_ref_id = ref_id
-
-            # Generate visualization for explainability
-            # Draw matches
             best_heatmap = cv2.drawMatches(
-                roi_ref, kp_ref,
+                ref_img, kp_ref,
                 roi_cap, kp_cap,
                 good, None,
                 flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
             )
 
-        # Short-circuit
         if score >= threshold:
             break
 
-    # 3. Decision Rule
     if best_score == -1.0:
         passed = False
         best_score = 0.0
     else:
         passed = bool(best_score >= threshold)
 
-    return InspectionResult(
+    return ROIResult(
+        roi_id=roi_id,
         passed=passed,
-        score=best_score,
         best_score=best_score,
         best_reference_id=best_ref_id,
+        decision_path="ORB_PASS" if passed else "ORB_FAIL",
         all_scores=scores,
-        dataset_version=dataset_version,
-        heatmap=best_heatmap
+        heatmap=best_heatmap,
+        orb_passed=passed,
+        embedding_passed=None
     )
 
 def _perform_embedding_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_coords: Dict[str, int],
-    threshold: float, # default is likely 0.35 distance
+    roi_rect: Dict[str, int],
+    threshold: float,
     dataset_version: str
-) -> InspectionResult:
+) -> ROIResult:
     """
-    Embedding-based inspection using cosine distance.
-    Decision Rule: best_distance = min(distances) <= threshold -> PASS
+    Embedding inspection for a SINGLE ROI.
     """
     model = EmbeddingModel.get_instance()
+    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
+    roi_id = roi_rect.get('id', 'unknown')
+
     if model.session is None:
-        logger.warning("Embedding model not loaded. Falling back to ORB.")
-        return _perform_orb_inspection(captured_img, reference_images, roi_coords, 0.75, dataset_version)
+        # Fallback to ORB if model missing (unlikely in prod but safe)
+        return _perform_orb_inspection(captured_img, reference_images, roi_rect, 0.75)
 
-    # 1. Validation of ROI (Captured Image)
-    x, y, w, h = roi_coords['x'], roi_coords['y'], roi_coords['width'], roi_coords['height']
     img_h, img_w = captured_img.shape[:2]
-
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
-        return InspectionResult(
-            passed=False,
-            score=0.0,
-            best_score=0.0,
-            best_reference_id="none",
-            all_scores={},
-            dataset_version=dataset_version,
-            heatmap=None
-        )
+         return ROIResult(roi_id, False, 0.0, "none", "BOUNDS_ERROR")
 
-    # Extract ROI from captured image
     roi_cap = captured_img[y:y+h, x:x+w]
-    
-    # Compute Embedding
     emb_cap = model.compute_embedding(roi_cap)
     
     if emb_cap is None:
-        # Failed to compute embedding
-        return InspectionResult(
-            passed=False,
-            score=0.0,
-            best_score=0.0,
-            best_reference_id="none",
-            all_scores={},
-            dataset_version=dataset_version,
-            heatmap=None
-        )
+         return ROIResult(roi_id, False, 0.0, "none", "EMBEDDING_FAIL")
 
-    scores: Dict[str, float] = {}
-    best_distance: float = float('inf')
-    best_ref_id: str = "none"
+    scores = {}
+    best_distance = float('inf')
+    best_ref_id = "none"
 
-    # 2. Iterate over all references
     for ref_id, ref_img in reference_images.items():
         ref_h, ref_w = ref_img.shape[:2]
 
-        # Check ROI bounds for this reference
-        if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-            # Skip invalid reference
-            continue
-            
-        # Extract ROI
-        roi_ref = ref_img[y:y+h, x:x+w]
-        
-        # Get/Cache Reference Embedding
-        emb_ref = model.get_reference_embedding(dataset_version, ref_id, roi_ref)
+        # Detect legacy full-frame reference
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode
+             ref_roi = ref_img
+
+        unique_ref_key = f"{roi_id}/{ref_id}"
+        emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi)
         if emb_ref is None:
             continue
             
-        # Compute Distance
         distance = model.compute_cosine_distance(emb_cap, emb_ref)
-        
-        # For compatibility with UI which expects "score" (higher is better),
-        # we will report score = 1.0 - distance.
-        score_val = 1.0 - distance
-        scores[ref_id] = score_val
+        scores[ref_id] = 1.0 - distance
         
         if distance < best_distance:
             best_distance = distance
             best_ref_id = ref_id
 
-    # 3. Decision Rule
     if best_distance == float('inf'):
         passed = False
         best_score = 0.0
@@ -342,140 +294,132 @@ def _perform_embedding_inspection(
         passed = bool(best_distance <= threshold)
         best_score = 1.0 - best_distance
 
-    return InspectionResult(
+    return ROIResult(
+        roi_id=roi_id,
         passed=passed,
-        score=best_score,
         best_score=best_score,
         best_reference_id=best_ref_id,
+        decision_path="EMB_PASS" if passed else "EMB_FAIL",
         all_scores=scores,
-        dataset_version=dataset_version,
-        heatmap=None # No heatmap for embedding
+        heatmap=None,
+        orb_passed=None,
+        embedding_passed=passed
     )
 
 def _perform_hybrid_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_coords: Dict[str, int],
+    roi_rect: Dict[str, int],
+    threshold: float,
+    dataset_version: str
+) -> ROIResult:
+    """
+    Hybrid inspection for a SINGLE ROI.
+    """
+    # 1. ORB Gate
+    orb_res = _perform_orb_inspection(captured_img, reference_images, roi_rect, ORB_GATE_THRESHOLD)
+
+    if not orb_res.passed:
+        orb_res.decision_path = "ORB_REJECT"
+        orb_res.orb_passed = False
+        orb_res.embedding_passed = None
+        return orb_res
+
+    # 2. Embedding
+    emb_res = _perform_embedding_inspection(captured_img, reference_images, roi_rect, threshold, dataset_version)
+
+    emb_res.orb_passed = True
+    emb_res.embedding_passed = emb_res.passed
+
+    # Preserve ORB visualization if embedding fails? Or just use Embedding result?
+    # Embedding doesn't have heatmap. We might want to keep ORB heatmap for context?
+    # Spec says "heatmap... contains RGB visualization... when using ORB".
+    # If Embedding passes, we don't have heatmap.
+    # If we want to show why it passed/failed, maybe keep ORB heatmap if available.
+    emb_res.heatmap = orb_res.heatmap
+
+    if emb_res.passed:
+        emb_res.decision_path = "EMBEDDING_ACCEPT"
+    else:
+        emb_res.decision_path = "EMBEDDING_REJECT"
+
+    return emb_res
+
+
+def perform_inspection(
+    captured_img: np.ndarray,
+    reference_images_nested: Dict[str, Dict[str, np.ndarray]],
+    roi_data_full: Dict[str, Any],
     threshold: float,
     dataset_version: str
 ) -> InspectionResult:
     """
-    Hybrid inspection: ORB Gate -> Embedding.
+    Main entry point for Multi-ROI inspection.
     """
-    # STAGE 1: ORB Gate
-    orb_result = _perform_orb_inspection(
-        captured_img,
-        reference_images,
-        roi_coords,
-        ORB_GATE_THRESHOLD, # Locked constant
-        dataset_version
-    )
-
-    if not orb_result.passed:
-        # ORB FAIL -> Immediate Final FAIL
-        orb_result.orb_passed = False
-        orb_result.embedding_passed = None # Not run
-        orb_result.decision_path = "ORB_REJECT"
-        return orb_result
-
-    # ORB PASS -> Continue to Embedding
-
-    # STAGE 2: Embedding Inspection
-    emb_result = _perform_embedding_inspection(
-        captured_img,
-        reference_images,
-        roi_coords,
-        threshold, # Passed threshold applies to embedding
-        dataset_version
-    )
-
-    # Augment result with Hybrid info
-    emb_result.orb_passed = True
-    emb_result.embedding_passed = emb_result.passed
-
-    if emb_result.passed:
-        emb_result.decision_path = "EMBEDDING_ACCEPT"
-    else:
-        emb_result.decision_path = "EMBEDDING_REJECT"
-
-    return emb_result
-
-def perform_inspection(
-    captured_img: np.ndarray,
-    reference_images: Dict[str, np.ndarray],
-    roi_coords: Dict[str, int],
-    threshold: float,
-    dataset_version: str,
-    method: str = "hybrid" # Changed default to reflect intent, but handled via Env var mostly
-) -> InspectionResult:
-    """
-    Performs deterministic inspection.
-    Dispatches based on INSPECTION_METHOD env var or method argument.
-    """
-    env_method = os.environ.get("INSPECTION_METHOD", "").lower()
-
-    # Priority: Env Var > Argument (if arg matches intent? No, usually Arg overrides Env,
-    # but the requirement says INSPECTION_METHOD dictates logic).
-    # "INSPECTION_METHOD=orb -> Step 7 ORB only"
-    # "INSPECTION_METHOD unset -> Hybrid (default)"
-
-    # If the caller passes "orb" or "embedding" explicitly (like UI might), should we honor it?
-    # The requirement says "INSPECTION_METHOD unset -> Step 9 Hybrid".
-    # And "Do not pass threshold through perform_inspection for ORB" (Wait, that was for hybrid construction).
-
-    # Let's assume if env var is set, it wins. If not, check method arg.
-    # If method arg is also default/unset, use Hybrid.
-
-    # However, existing calls might pass "embedding".
-    # If env var is unset, and method="embedding" (from window.py), should we force Hybrid?
-    # "Default -> Step 9 hybrid logic"
-    # "INSPECTION_METHOD unset -> Step 9 Hybrid (default)"
+    rois = roi_data_full.get("rois", [])
     
-    # But window.py is calling it with method="embedding".
-    # If I don't change window.py, it will keep asking for embedding.
-    # The user instructions said: "INSPECTION_METHOD unset -> Step 9 Hybrid".
-    # This implies that even if `method` arg says "embedding", if env is unset, we might want Hybrid?
-    # Or should I change `window.py` to NOT pass "embedding"?
-    # Modifying `window.py` was part of my plan (to update log data).
-    # I should also update `window.py` to NOT hardcode "embedding" or pass "hybrid" or rely on default.
+    roi_results: Dict[str, ROIResult] = {}
 
-    # Logic implementation:
-    active_method = "hybrid" # Default
+    # Strategy Determination (Global env var applies to all ROIs)
+    env_method = os.environ.get("INSPECTION_METHOD", "hybrid").lower()
 
-    if env_method == "orb":
-        active_method = "orb"
-    elif env_method == "embedding":
-        active_method = "embedding"
+    for roi in rois:
+        roi_id = roi["id"]
+
+        # Get references for this ROI
+        # If legacy, `reference_images_nested` might just be {ref_id: img} if caller didn't adapt?
+        # We rely on caller (MainWindow) to pass correct structure.
+        # But wait, MainWindow calls `dataset.get_active_references` which we updated.
+        # It returns `{roi_id: {ref_id: img}}`.
+
+        refs = reference_images_nested.get(roi_id, {})
+
+        if not refs:
+            # No references for this ROI -> FAIL or SKIP?
+            # "Final PASS requires all ROIs to PASS".
+            # If no reference, we can't pass.
+            print(f"DEBUG: No references found for ROI {roi_id}")
+            roi_results[roi_id] = ROIResult(
+                roi_id, False, 0.0, "none", "NO_REFERENCES"
+            )
+            continue
+
+        # Dispatch
+        if env_method == "orb":
+            res = _perform_orb_inspection(captured_img, refs, roi, threshold)
+        elif env_method == "embedding":
+            res = _perform_embedding_inspection(captured_img, refs, roi, threshold, dataset_version)
+        elif env_method == "ssim":
+             res = _perform_ssim_inspection(captured_img, refs, roi, threshold)
+        else:
+             res = _perform_hybrid_inspection(captured_img, refs, roi, threshold, dataset_version)
+
+        roi_results[roi_id] = res
+
+    # Final Decision
+    # "If any ROI fails -> Final FAIL"
+    passed = all(r.passed for r in roi_results.values()) if roi_results else False
+
+    # Aggregates for legacy fields
+    # Score = min score (bottleneck)
+    if not roi_results:
+        min_score = 0.0
+        worst_roi = None
     else:
-        # Env unset or unknown -> Hybrid
-        # Check explicit method arg if provided and not default?
-        # If the caller passed "ssim", maybe we should respect it?
-        if method == "ssim":
-            active_method = "ssim"
-        elif method == "orb" and not env_method:
-            active_method = "orb"
-        elif method == "embedding" and not env_method:
-            # Here is the catch. Window.py currently passes "embedding".
-            # If I don't change window.py, and env is unset, do we run Hybrid?
-            # User said "INSPECTION_METHOD unset -> Hybrid".
-            # So I should probably treat method="embedding" as eligible for Hybrid override if env is unset?
-            # OR better: I will change window.py to pass `method="hybrid"` or remove the arg.
-            # I will assume for `perform_inspection`, if env is unset, "hybrid" is the target.
-            active_method = "hybrid"
+        min_score = min(r.best_score for r in roi_results.values())
+        # Find the worst ROI for metadata
+        worst_roi = min(roi_results.values(), key=lambda r: r.best_score)
 
-    if active_method == "orb":
-        return _perform_orb_inspection(
-            captured_img, reference_images, roi_coords, threshold, dataset_version
-        )
-    elif active_method == "embedding":
-        return _perform_embedding_inspection(
-            captured_img, reference_images, roi_coords, threshold, dataset_version
-        )
-    elif active_method == "ssim":
-        return _perform_ssim_inspection(
-            captured_img, reference_images, roi_coords, threshold, dataset_version
-        )
-    else:
-        return _perform_hybrid_inspection(
-            captured_img, reference_images, roi_coords, threshold, dataset_version
-        )
+    return InspectionResult(
+        passed=passed,
+        roi_results=roi_results,
+        dataset_version=dataset_version,
+        score=min_score,
+        best_score=min_score,
+        best_reference_id=worst_roi.best_reference_id if worst_roi else "none",
+        all_scores={}, # Flattening is ambiguous
+        heatmap=worst_roi.heatmap if worst_roi else None,
+        decision_path=f"ALL_PASS" if passed else "ROI_FAIL",
+        orb_passed=all(r.orb_passed for r in roi_results.values() if r.orb_passed is not None),
+        embedding_passed=all(r.embedding_passed for r in roi_results.values() if r.embedding_passed is not None)
+    )

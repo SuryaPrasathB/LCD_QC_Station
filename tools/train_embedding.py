@@ -71,9 +71,52 @@ def save_metadata(output_dir, version="v2", input_size=(128, 128), embedding_dim
         json.dump(meta, f, indent=2)
     print("Metadata saved.")
 
+def train_per_roi(data_root, output_dir):
+    """
+    Placeholder for ROI-scoped training loop.
+    Iterates over the Multi-ROI dataset structure:
+    data_root/
+      ├── digits_main/
+      ├── status_icon/
+      ...
+    """
+    if not os.path.exists(data_root):
+        print(f"Data root {data_root} not found. Skipping training simulation.")
+        return
+
+    print(f"Scanning dataset at {data_root} for ROIs...")
+
+    # Detect ROIs (subdirectories)
+    rois = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d))]
+
+    if not rois:
+        print("No ROI folders found. Checks for legacy structure or empty dataset.")
+        return
+
+    for roi_id in rois:
+        print(f"Processing ROI: {roi_id}")
+        roi_path = os.path.join(data_root, roi_id)
+
+        # Load images for this ROI
+        images = [f for f in os.listdir(roi_path) if f.lower().endswith(('.png', '.jpg'))]
+        print(f"  Found {len(images)} images for training/finetuning.")
+
+        # HERE: Logic to train a specific model for this ROI or fine-tune
+        # For Step 10, we are just acknowledging the structure.
+        # "ROIs are trained independently" -> This loop ensures isolation.
+
+        # If we were producing per-ROI models:
+        # model = create_mobilenet_embedding_model()
+        # train(model, roi_path)
+        # export_to_onnx(model, os.path.join(output_dir, f"embedding_{roi_id}.onnx"))
+        pass
+
+    print("ROI-scoped training scan complete.")
+
 def main():
     parser = argparse.ArgumentParser(description="Train/Export Embedding Model")
     parser.add_argument("--output_dir", type=str, default="models", help="Directory to save artifacts")
+    parser.add_argument("--data_dir", type=str, default="data/reference/v1", help="Path to dataset version for training")
     parser.add_argument("--export_only", action="store_true", help="Skip training, just export initialized model")
     
     args = parser.parse_args()
@@ -84,7 +127,10 @@ def main():
     model = create_mobilenet_embedding_model()
     
     if not args.export_only:
-        print("Note: Actual training logic would go here (loading dataset, triplet loss, etc).")
+        print("Starting Training Pipeline...")
+        # New Step 10 Logic:
+        train_per_roi(args.data_dir, args.output_dir)
+        print("Note: Actual training logic is simulated above.")
         print("Proceeding to export initialized model for demonstration/testing purposes.")
     
     onnx_path = os.path.join(args.output_dir, "embedding_v2.onnx")

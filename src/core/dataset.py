@@ -3,7 +3,7 @@ import json
 import shutil
 import uuid
 from datetime import datetime
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Union, Any
 from dataclasses import dataclass
 
 @dataclass
@@ -14,7 +14,7 @@ class OverrideRecord:
     score: float
     timestamp: str
     image_path: str
-    roi: List[int]
+    roi: Any # Can be List[int] (legacy) or Dict (multi-roi)
 
 class DatasetManager:
     """
@@ -27,6 +27,7 @@ class DatasetManager:
     VERSION_FILE = "dataset_version.json"
     PENDING_FILE = "pending_learning.json"
 
+    # Files that might exist at root of a version (Legacy)
     ROOT_FILES = ["roi.json", "reference.jpg", "reference.png"]
 
     def __init__(self, root_dir: str = "."):
@@ -59,7 +60,7 @@ class DatasetManager:
             self.active_version = "v1"
             self._write_version_file(self.active_version, "Initial version", None)
 
-            # Migration Logic
+            # Migration Logic (Legacy -> v1 folder)
             v1_path = os.path.join(self.ref_base_path, "v1")
             os.makedirs(v1_path, exist_ok=True)
 
@@ -76,7 +77,8 @@ class DatasetManager:
                         print(f"Error migrating {src}: {e}")
 
             if not migrated and not os.listdir(v1_path):
-                print("No existing reference files found to migrate.")
+                # Only log if empty, no error
+                pass
 
     def _write_version_file(self, version: str, description: str, based_on: Optional[str]):
         data = {
@@ -91,82 +93,108 @@ class DatasetManager:
     def get_active_version_path(self) -> str:
         return os.path.join(self.ref_base_path, self.active_version)
 
-    def get_active_paths(self) -> Tuple[str, str]:
+    def get_active_references(self) -> Dict[str, Dict[str, str]]:
         """
-        Returns (roi_path, ref_path).
-        Tries reference.png first, then reference.jpg.
-        """
-        v_path = self.get_active_version_path()
-        roi_path = os.path.join(v_path, "roi.json")
-
-        # Check for png or jpg
-        ref_path = os.path.join(v_path, "reference.png")
-        if not os.path.exists(ref_path):
-            ref_path = os.path.join(v_path, "reference.jpg")
-
-        return roi_path, ref_path
-
-    def get_active_references(self) -> List[str]:
-        """
-        Returns a list of all valid reference image paths in the active version.
-        Excludes roi.json and meta.json.
+        Returns a dictionary mapping ROI IDs to a dict of {ref_id: path}.
+        Structure:
+        {
+           "roi_id_1": { "ref_001": "/path/to/ref_001.png", ... },
+           "roi_id_2": ...
+        }
+        Handles Legacy format (single reference at root) by mapping it to "digits_main".
         """
         v_path = self.get_active_version_path()
         if not os.path.exists(v_path):
-            return []
+            return {}
 
-        valid_exts = {".png", ".jpg", ".jpeg"}
-        excluded_files = {"roi.json", "meta.json"}
+        refs = {}
 
-        refs = []
-        try:
+        # 1. Check for Subdirectories (Multi-ROI)
+        # We iterate through subdirectories in v_path.
+        has_subdirs = False
+        for item in os.listdir(v_path):
+            item_path = os.path.join(v_path, item)
+            if os.path.isdir(item_path):
+                # Assume this is an ROI folder
+                roi_id = item
+                roi_refs = {}
+                for f in os.listdir(item_path):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        ref_id = os.path.splitext(f)[0]
+                        roi_refs[ref_id] = os.path.join(item_path, f)
+
+                # Even if empty, we might want to know it exists?
+                # But inspection needs images.
+                if roi_refs:
+                    refs[roi_id] = roi_refs
+                    has_subdirs = True
+
+        # 2. Check for Root References (Legacy)
+        if not has_subdirs:
+            legacy_refs = {}
             for f in os.listdir(v_path):
-                if f in excluded_files:
+                if f.lower() in ["roi.json", "meta.json", "dataset_version.json"]:
                     continue
+                if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                     ref_id = os.path.splitext(f)[0]
+                     legacy_refs[ref_id] = os.path.join(v_path, f)
 
-                ext = os.path.splitext(f)[1].lower()
-                if ext in valid_exts:
-                    refs.append(os.path.join(v_path, f))
-        except Exception as e:
-            print(f"Error listing references in {v_path}: {e}")
-            return []
+            if legacy_refs:
+                # Default legacy ID matches what ROIManager uses
+                refs["digits_main"] = legacy_refs
 
-        return sorted(refs)
+        return refs
+
+    def save_roi_reference(self, roi_id: str, source_path: str) -> bool:
+        """
+        Saves a reference image for a specific ROI.
+        Creates the ROI subdirectory if needed.
+        """
+        self.ensure_active_version_writable()
+        v_path = self.get_active_version_path()
+        roi_dir = os.path.join(v_path, roi_id)
+        os.makedirs(roi_dir, exist_ok=True)
+
+        existing = [f for f in os.listdir(roi_dir) if f.startswith("ref_")]
+        count = len(existing) + 1
+        filename = f"ref_{count:03d}.png"
+        target_path = os.path.join(roi_dir, filename)
+
+        try:
+            shutil.copy(source_path, target_path)
+            return True
+        except IOError as e:
+            print(f"Error saving reference for {roi_id}: {e}")
+            return False
+
+    def clear_active_references(self):
+        """
+        Clears all references in the active version (files and subdirs).
+        """
+        v_path = self.get_active_version_path()
+        if not os.path.exists(v_path):
+            return
+
+        for item in os.listdir(v_path):
+            item_path = os.path.join(v_path, item)
+            # Don't delete dataset metadata if any
+            if item == "roi.json":
+                continue
+
+            try:
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
+            except OSError as e:
+                print(f"Error clearing path {item_path}: {e}")
 
     def save_inspection(self, inspection_id: str, image: bytes, result_data: Dict) -> str:
-        """
-        Saves inspection image and result JSON.
-        Returns the image path.
-        """
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-        filename_base = f"{timestamp}_{inspection_id}"
-
-        # Save Image
-        image_filename = f"{filename_base}.png"
-        image_path = os.path.join(self.inspections_path, image_filename)
-
-        # Write bytes or cv2 image?
-        # The caller usually has a cv2 image or bytes.
-        # Assuming caller handles image writing?
-        # No, "Saves inspection image".
-        # But passing bytes is generic.
-        # Let's assume the caller saves the image to a temp path and we copy/move it?
-        # Or better, caller passes the path where they saved it temporarily?
-        # Requirement: "inspections/2025-01-01...png"
         pass
-        # Actually, let's let the caller save the image to the final path returned by this function?
-        # No, that breaks encapsulation of paths.
-        # Let's assume the caller passes the image data (numpy array) but I don't want to depend on cv2 here if possible?
-        # src/core/inspection.py uses cv2. It's fine.
-        # But to keep this file clean, let's accept a `source_image_path` and we copy it.
-
-        return image_path
 
     def record_inspection(self, inspection_id: str, source_image_path: str, result_data: Dict) -> str:
         """
         Moves/Copies the source image to the inspection folder and saves the result JSON.
-        result_data should include 'passed', 'score', etc.
-        Returns the final image path.
         """
         timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -191,7 +219,7 @@ class DatasetManager:
             "id": inspection_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "dataset_version": self.active_version,
-            "image_path": image_filename, # Relative to inspections folder
+            "image_path": image_filename,
             **result_data
         }
 
@@ -220,7 +248,6 @@ class DatasetManager:
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
 
-        # Logic: Only False Negatives (System: FAIL(False), Operator: PASS(True)) are candidates for learning.
         if not record.original_result and record.overridden_result:
             self._add_to_pending(filepath)
 
@@ -252,7 +279,6 @@ class DatasetManager:
     def commit_learning(self) -> Tuple[bool, str]:
         """
         Commits pending overrides to a new dataset version.
-        Returns (success, message).
         """
         count = self.get_pending_count()
         if count == 0:
@@ -271,15 +297,44 @@ class DatasetManager:
 
         os.makedirs(new_version_path, exist_ok=True)
 
-        # 2. Copy Base Reference Files (roi.json, reference.png)
-        # We copy from the *previous* version to ensure continuity
-        roi_src, ref_src = self.get_active_paths()
+        # 2. Copy Base Reference Files & Structure (with Migration)
+        # Check if old version is legacy (has root images)
+        is_legacy = False
+        legacy_files = []
+        for item in os.listdir(old_version_path):
+             if item.lower().endswith(('.png', '.jpg', '.jpeg')) and os.path.isfile(os.path.join(old_version_path, item)):
+                 is_legacy = True
+                 legacy_files.append(item)
 
+        # Copy roi.json
+        roi_src = os.path.join(old_version_path, "roi.json")
         if os.path.exists(roi_src):
             shutil.copy(roi_src, os.path.join(new_version_path, "roi.json"))
-        if os.path.exists(ref_src):
-            ref_name = os.path.basename(ref_src)
-            shutil.copy(ref_src, os.path.join(new_version_path, ref_name))
+
+        # Copy Data
+        for item in os.listdir(old_version_path):
+            if item == "roi.json" or item == "dataset_version.json":
+                continue
+
+            src_path = os.path.join(old_version_path, item)
+            dst_path = os.path.join(new_version_path, item)
+
+            if os.path.isdir(src_path):
+                # Copy existing ROI folders as-is
+                shutil.copytree(src_path, dst_path)
+            elif os.path.isfile(src_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
+                if is_legacy:
+                    # MIGRATE: Move root image to digits_main folder
+                    target_dir = os.path.join(new_version_path, "digits_main")
+                    os.makedirs(target_dir, exist_ok=True)
+                    shutil.copy(src_path, os.path.join(target_dir, item))
+                else:
+                    # Should not happen in pure multi-roi, but copy anyway if exists?
+                    # If we have root images but not "legacy" mode? (Mixed state).
+                    # Treat as legacy for safety.
+                    target_dir = os.path.join(new_version_path, "digits_main")
+                    os.makedirs(target_dir, exist_ok=True)
+                    shutil.copy(src_path, os.path.join(target_dir, item))
 
         # 3. Process Pending Overrides
         try:
@@ -297,19 +352,72 @@ class DatasetManager:
                 with open(p_file, 'r') as pf:
                     record = json.load(pf)
 
-                # Copy image to new version folder
-                # Image path in record is absolute or relative to inspections?
-                # It is stored as full path or relative?
-                # In record_inspection, we returned full path (or relative to cwd).
-                # Let's assume absolute or valid relative path.
-                src_img = record['image_path']
-                if os.path.exists(src_img):
-                    dst_img_name = f"learned_{uuid.uuid4().hex[:8]}.png"
-                    dst_img = os.path.join(new_version_path, dst_img_name)
-                    shutil.copy(src_img, dst_img)
+                # Resolve image path
+                src_img_path = record.get('image_path')
+                if not os.path.isabs(src_img_path):
+                    # Try resolving relative to CWD
+                    if not os.path.exists(src_img_path):
+                        # Try inside inspections
+                        candidate = os.path.join(self.inspections_path, os.path.basename(src_img_path))
+                        if os.path.exists(candidate):
+                             src_img_path = candidate
+
+                if not os.path.exists(src_img_path):
+                    print(f"Skipping override {p_file}: Image not found at {src_img_path}")
+                    continue
+
+                import cv2
+                img = cv2.imread(src_img_path)
+                if img is None:
+                    print(f"Skipping override {p_file}: Failed to read image")
+                    continue
+
+                roi_data = record.get('roi')
+                # Support new Multi-ROI structure
+                if isinstance(roi_data, dict) and "rois" in roi_data:
+                    for r in roi_data["rois"]:
+                        rid = r["id"]
+                        rx, ry, rw, rh = r["x"], r["y"], r["w"], r["h"]
+
+                        # Validate bounds
+                        if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
+                            print(f"Skipping ROI {rid}: Bounds invalid {rx},{ry},{rw},{rh} for img {img.shape}")
+                            continue
+
+                        # Crop
+                        crop = img[ry:ry+rh, rx:rx+rw]
+
+                        target_dir = os.path.join(new_version_path, rid)
+                        os.makedirs(target_dir, exist_ok=True)
+
+                        fname = f"learned_{uuid.uuid4().hex[:8]}.png"
+                        cv2.imwrite(os.path.join(target_dir, fname), crop)
+
+                    # We count this record as learned
                     learned_count += 1
+
+                # Legacy handling (single roi list [x,y,w,h])
+                elif isinstance(roi_data, list) and len(roi_data) == 4:
+                     # Map to default "digits_main"
+                     rid = "digits_main"
+                     rx, ry, rw, rh = roi_data[0], roi_data[1], roi_data[2], roi_data[3]
+
+                     if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
+                         print(f"Skipping Legacy ROI {rid}: Bounds invalid")
+                         continue
+
+                     crop = img[ry:ry+rh, rx:rx+rw]
+                     target_dir = os.path.join(new_version_path, rid)
+                     os.makedirs(target_dir, exist_ok=True)
+
+                     fname = f"learned_{uuid.uuid4().hex[:8]}.png"
+                     cv2.imwrite(os.path.join(target_dir, fname), crop)
+                     learned_count += 1
+
             except Exception as e:
                 print(f"Error processing pending file {p_file}: {e}")
+                import traceback
+                traceback.print_exc()
 
         # 4. Clear Pending
         if os.path.exists(self.pending_file_path):
@@ -319,11 +427,8 @@ class DatasetManager:
         self.active_version = new_version
         self._write_version_file(new_version, f"Learned from {learned_count} overrides", f"v{current_v_num}")
 
-        return True, f"Committed {learned_count} images to {new_version}."
+        return True, f"Committed {learned_count} overrides to {new_version}."
 
     def ensure_active_version_writable(self):
-        """
-        Ensures the active version folder exists.
-        """
         path = self.get_active_version_path()
         os.makedirs(path, exist_ok=True)
