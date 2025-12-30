@@ -239,9 +239,11 @@ def get_inspection_result():
 def override_inspection(req: OverrideRequest):
     state = ServerState.get_instance()
     try:
+        print(f"[API] Override Request: {req.inspection_id}, {req.action}")
         state.override_inspection(req.inspection_id, req.action)
         return {"status": "ok", "action": req.action}
     except Exception as e:
+        print(f"[API] Override Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/inspection/frame")

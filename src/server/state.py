@@ -170,13 +170,16 @@ class ServerState:
         Records an override for a specific inspection.
         Action: "pass" or "fail"
         """
+        print(f"[Server] Override requested for {inspection_id} -> {action}")
         with self.lock:
             last_res = self.last_inspection_result
             if not last_res or last_res.get("inspection_id") != inspection_id:
+                print(f"[Server] Override Failed: Inspection ID mismatch or missing. Last: {last_res.get('inspection_id') if last_res else 'None'}")
                 raise Exception("Inspection not found or expired")
 
             frame_path = self.last_inspection_frame_path
             if not frame_path or not os.path.exists(frame_path):
+                print(f"[Server] Override Failed: Frame path missing {frame_path}")
                 raise Exception("Inspection frame missing")
 
             current_rois = self.roi_data
@@ -186,6 +189,8 @@ class ServerState:
 
             # New decision
             new_passed = (action.lower() == "pass")
+
+            print(f"[Server] Original: {original_passed}, New: {new_passed}")
 
             # Determine score (just use original global score or 0.0)
             # We might not have global score easily available in last_inspection_result dict
@@ -208,6 +213,7 @@ class ServerState:
             )
 
             self.dataset_manager.save_override(record)
+            print(f"[Server] Override saved. Pending count: {self.dataset_manager.get_pending_count()}")
 
             # Update local result to reflect override (optional, but good for UI if we polled again)
             self.last_inspection_result["overridden"] = True

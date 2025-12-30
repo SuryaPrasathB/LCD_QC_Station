@@ -25,6 +25,7 @@ class ApiWorker(QThread):
             res = self.func(*self.args, **self.kwargs)
             self.result_ready.emit(res)
         except Exception as e: # pylint: disable=broad-exception-caught
+            print(f"[Client] Worker Error in {self.func.__name__}: {e}")
             self.error_occurred.emit(str(e))
         finally:
             self.finished_task.emit(self)
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self.apply_state(connected=False)
+        print("[Client] Application initialized")
 
     def init_ui(self):
         central_widget = QWidget()
@@ -153,6 +155,7 @@ class MainWindow(QMainWindow):
             self.active_workers.remove(worker)
 
     def closeEvent(self, event):
+        print("[Client] Closing application...")
         # Stop timers
         self.live_timer.stop()
         self.result_timer.stop()
@@ -233,7 +236,8 @@ class MainWindow(QMainWindow):
             self.frame_worker = ApiWorker(self.client.get_live_frame, with_rois=True)
             self.frame_worker.result_ready.connect(self.update_live_view)
             self.frame_worker.start()
-        except Exception: # pylint: disable=broad-exception-caught
+        except Exception as e: # pylint: disable=broad-exception-caught
+            # print(f"Poll Error: {e}") # Optional
             pass
 
     def update_live_view(self, data):
@@ -241,6 +245,7 @@ class MainWindow(QMainWindow):
         self.live_view.set_frame(pixmap)
 
     def toggle_setup_mode(self, checked):
+        print(f"[Client] Setup Mode: {checked}")
         self.setup_mode_active = checked
         self.live_view.set_setup_mode(checked)
         if checked:
@@ -249,6 +254,7 @@ class MainWindow(QMainWindow):
             self.btn_setup.setText("Setup ROI")
 
     def on_roi_drawn(self, x, y, w, h):
+        print(f"[Client] ROI drawn: {x:.3f},{y:.3f},{w:.3f},{h:.3f}")
         worker = self.start_worker(self.client.get_roi_list)
         worker.result_ready.connect(lambda rois: self.prompt_roi_name(rois, x, y, w, h))
 
@@ -260,16 +266,19 @@ class MainWindow(QMainWindow):
 
     def add_roi(self, roi_id, x, y, w, h):
         worker = self.start_worker(self.client.set_roi, roi_id, x, y, w, h)
-        worker.result_ready.connect(lambda res: print(f"ROI Added: {res}"))
+        worker.result_ready.connect(lambda res: print(f"[Client] ROI {roi_id} added"))
 
     def clear_rois(self):
+        print("[Client] Clearing ROIs requested")
         self.start_worker(self.client.clear_rois)
 
     def commit_rois(self):
+        print("[Client] Committing ROIs requested")
         worker = self.start_worker(self.client.commit_rois)
         worker.result_ready.connect(lambda: QMessageBox.information(self, "Info", "ROIs Committed"))
 
     def start_inspection(self):
+        print("[Client] Start Inspection requested")
         self.results_panel.clear()
         self.current_inspection_id = None
         self.results_panel.set_buttons_enabled(False)
@@ -293,9 +302,11 @@ class MainWindow(QMainWindow):
         self.result_worker.start()
 
     def on_poll_error(self, err_msg):
+        # print(f"Poll Result Error: {err_msg}")
         pass
 
     def on_inspection_result(self, result):
+        # print(f"[Client] Got result: {result.get('inspection_id')}")
         self.results_panel.update_results(result)
         self.results_panel.set_buttons_enabled(True) # Enable override buttons
         self.result_timer.stop()
@@ -310,5 +321,6 @@ class MainWindow(QMainWindow):
         if not self.current_inspection_id:
             return
 
+        print(f"[Client] Triggering Override: {action}")
         worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action)
         worker.result_ready.connect(lambda: QMessageBox.information(self, "Override", f"Marked as {action.upper()}"))
