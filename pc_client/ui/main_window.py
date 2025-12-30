@@ -306,7 +306,13 @@ class MainWindow(QMainWindow):
         pass
 
     def on_inspection_result(self, result):
-        # print(f"[Client] Got result: {result.get('inspection_id')}")
+        res_id = result.get('inspection_id')
+        print(f"[Client] Polled Result ID: {res_id} (Expected: {self.current_inspection_id})")
+
+        if self.current_inspection_id and res_id != self.current_inspection_id:
+            print("[Client] Received stale result. Ignoring and continuing poll...")
+            return
+
         self.results_panel.update_results(result)
         self.results_panel.set_buttons_enabled(True) # Enable override buttons
         self.result_timer.stop()
