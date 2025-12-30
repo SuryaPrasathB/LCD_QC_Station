@@ -246,6 +246,19 @@ def override_inspection(req: OverrideRequest):
         print(f"[API] Override Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.get("/learning/status")
+def get_learning_status():
+    state = ServerState.get_instance()
+    return {"pending_count": state.get_pending_learning_count()}
+
+@app.post("/learning/commit")
+def commit_learning():
+    state = ServerState.get_instance()
+    try:
+        return state.commit_learning()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.get("/inspection/frame")
 def get_inspection_frame():
     state = ServerState.get_instance()

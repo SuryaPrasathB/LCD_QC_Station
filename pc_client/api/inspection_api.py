@@ -90,6 +90,8 @@ class InspectionClient:
         """GET /inspection/result"""
         # print("[Client] Polling result...") # Noisy
         resp = requests.get(f"{self.base_url}/inspection/result", timeout=self.timeout)
+        if resp.status_code == 404:
+            return None
         resp.raise_for_status()
         return resp.json()
 
@@ -110,4 +112,18 @@ class InspectionClient:
         resp = requests.post(f"{self.base_url}/inspection/override", json=payload, timeout=self.timeout)
         resp.raise_for_status()
         print(f"[Client] Override success: {resp.json()}")
+        return resp.json()
+
+    def get_learning_status(self) -> Dict:
+        """GET /learning/status"""
+        resp = requests.get(f"{self.base_url}/learning/status", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def commit_learning(self) -> Dict:
+        """POST /learning/commit"""
+        print("[Client] Committing learning data...")
+        resp = requests.post(f"{self.base_url}/learning/commit", timeout=self.timeout)
+        resp.raise_for_status()
+        print(f"[Client] Learning commit success: {resp.json()}")
         return resp.json()

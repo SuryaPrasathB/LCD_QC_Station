@@ -219,6 +219,18 @@ class ServerState:
             self.last_inspection_result["overridden"] = True
             self.last_inspection_result["override_status"] = "PASS" if new_passed else "FAIL"
 
+    def get_pending_learning_count(self) -> int:
+        return self.dataset_manager.get_pending_count()
+
+    def commit_learning(self) -> Dict[str, Any]:
+        """
+        Commits pending overrides to a new dataset version.
+        """
+        success, msg = self.dataset_manager.commit_learning()
+        if not success:
+            raise Exception(msg)
+        return {"status": "committed", "message": msg, "new_version": self.dataset_manager.active_version}
+
     async def run_inspection_async(self) -> str:
         """
         Async wrapper to run inspection in background.

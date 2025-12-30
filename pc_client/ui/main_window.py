@@ -141,6 +141,20 @@ class MainWindow(QMainWindow):
         self.results_panel.override_fail.connect(lambda: self.trigger_override("fail"))
         right_layout.addWidget(self.results_panel)
 
+        # Learning Panel
+        learning_group = QGroupBox("Active Learning")
+        learning_layout = QVBoxLayout()
+
+        self.lbl_pending = QLabel("Pending Commits: -")
+        self.btn_commit_learning = QPushButton("Commit Learning")
+        self.btn_commit_learning.setStyleSheet("background-color: #f57c00; color: white;") # Orange
+        self.btn_commit_learning.clicked.connect(self.trigger_commit_learning)
+
+        learning_layout.addWidget(self.lbl_pending)
+        learning_layout.addWidget(self.btn_commit_learning)
+        learning_group.setLayout(learning_layout)
+        right_layout.addWidget(learning_group)
+
         main_layout.addLayout(right_layout, stretch=1)
 
     def start_worker(self, func, *args, **kwargs):
@@ -225,6 +239,7 @@ class MainWindow(QMainWindow):
         self.btn_connect.setEnabled(True)
         if success:
             self.apply_state(True)
+            self.refresh_learning_status()
         else:
             QMessageBox.critical(self, "Error", "Could not connect to server.")
 
@@ -306,6 +321,10 @@ class MainWindow(QMainWindow):
         pass
 
     def on_inspection_result(self, result):
+        if result is None:
+            # 404 or not ready
+            return
+
         res_id = result.get('inspection_id')
         print(f"[Client] Polled Result ID: {res_id} (Expected: {self.current_inspection_id})")
 
@@ -329,4 +348,21 @@ class MainWindow(QMainWindow):
 
         print(f"[Client] Triggering Override: {action}")
         worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action)
-        worker.result_ready.connect(lambda: QMessageBox.information(self, "Override", f"Marked as {action.upper()}"))
+        worker.result_ready.connect(lambda: self.on_override_complete(action))
+
+    def on_override_complete(self, action):
+        QMessageBox.information(self, "Override", f"Marked as {action.upper()}")
+        self.refresh_learning_status()
+
+    def refresh_learning_status(self):
+        worker = self.start_worker(self.client.get_learning_status)
+        worker.result_ready.connect(self.update_learning_ui)
+
+    def update_learning_ui(self, status):
+        count = status.get("pending_count", 0)
+        self.lbl_pending.setText(f"Pending Commits: {count}")
+
+    def trigger_commit_learning(self):
+        worker = self.start_worker(self.client.commit_learning)
+        worker.result_ready.connect(lambda res: QMessageBox.information(self, "Learning", f"Committed: {res.get('message')}"))
+        worker.result_ready.connect(lambda: self.refresh_learning_status())
