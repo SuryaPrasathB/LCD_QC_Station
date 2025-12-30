@@ -1,6 +1,6 @@
 from typing import Optional
 from PyQt6.QtWidgets import QWidget, QSizePolicy
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QPointF
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QPaintEvent
 
 class LiveView(QWidget):
@@ -17,8 +17,8 @@ class LiveView(QWidget):
         self.drawing = False
         self.setup_mode = False
 
-        self.start_point: QPoint = QPoint()
-        self.current_point: QPoint = QPoint()
+        self.start_point: QPointF = QPointF()
+        self.current_point: QPointF = QPointF()
         self.image_rect: QRectF = QRectF() # The rect where the image is actually drawn (letterboxed)
 
     def set_frame(self, pixmap: QPixmap):
@@ -61,7 +61,10 @@ class LiveView(QWidget):
                 pen.setStyle(Qt.PenStyle.DashLine)
                 painter.setPen(pen)
 
-                rect = QRectF(self.start_point, self.current_point).normalized()
+                # Robust casting to QPointF
+                p1 = QPointF(self.start_point)
+                p2 = QPointF(self.current_point)
+                rect = QRectF(p1, p2).normalized()
                 painter.drawRect(rect)
         else:
             # Placeholder text
@@ -76,7 +79,7 @@ class LiveView(QWidget):
             # Check if inside image rect
             if self.image_rect.contains(event.position()):
                 self.drawing = True
-                self.start_point = event.position().toPoint()
+                self.start_point = event.position()
                 self.current_point = self.start_point
                 self.update()
 
@@ -86,7 +89,7 @@ class LiveView(QWidget):
             pos = event.position()
             x = max(self.image_rect.left(), min(pos.x(), self.image_rect.right()))
             y = max(self.image_rect.top(), min(pos.y(), self.image_rect.bottom()))
-            self.current_point = QPoint(int(x), int(y))
+            self.current_point = QPointF(x, y)
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -94,8 +97,10 @@ class LiveView(QWidget):
             self.drawing = False
             self.update()
 
-            # Normalize coordinates
-            rect = QRectF(self.start_point, self.current_point).normalized()
+            # Robust casting to QPointF
+            p1 = QPointF(self.start_point)
+            p2 = QPointF(self.current_point)
+            rect = QRectF(p1, p2).normalized()
 
             # Check for minimum size (ignore accidental clicks)
             if rect.width() < 5 or rect.height() < 5:

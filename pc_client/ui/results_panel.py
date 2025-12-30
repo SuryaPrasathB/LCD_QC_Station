@@ -84,14 +84,26 @@ class ResultsPanel(QWidget):
             self.set_buttons_enabled(False)
             return
 
-        # Update Global Status
-        passed = result.get("passed", False)
-
-        # Check if already overridden in result data (if server updates it)
+        # Determine effective pass status
+        original_passed = result.get("passed", False)
         is_overridden = result.get("overridden", False)
-        status_text = "PASS" if passed else "FAIL"
+
+        passed = original_passed
+        status_text = ""
+
         if is_overridden:
-            status_text += " (OVR)"
+            override_status = result.get("override_status", "").upper()
+            if override_status == "PASS":
+                passed = True
+                status_text = "PASS (OVR)"
+            elif override_status == "FAIL":
+                passed = False
+                status_text = "FAIL (OVR)"
+            else:
+                # Fallback if unknown status
+                status_text = "PASS (OVR)" if original_passed else "FAIL (OVR)"
+        else:
+            status_text = "PASS" if original_passed else "FAIL"
 
         self.lbl_status.setText(status_text)
         self.lbl_status.setObjectName("result_pass" if passed else "result_fail")
