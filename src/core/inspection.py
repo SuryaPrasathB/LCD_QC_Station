@@ -4,9 +4,12 @@ import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
 import logging
+import os
 from src.core.embedding import EmbeddingModel
 
 logger = logging.getLogger(__name__)
+
+ORB_GATE_THRESHOLD = 0.50
 
 @dataclass
 class InspectionResult:
@@ -17,6 +20,10 @@ class InspectionResult:
     all_scores: Dict[str, float]
     dataset_version: str
     heatmap: Optional[np.ndarray] = None
+    # STEP 9 additions
+    orb_passed: Optional[bool] = None
+    embedding_passed: Optional[bool] = None
+    decision_path: Optional[str] = None
 
 def _perform_ssim_inspection(
     captured_img: np.ndarray,
@@ -320,36 +327,6 @@ def _perform_embedding_inspection(
         
         # For compatibility with UI which expects "score" (higher is better),
         # we will report score = 1.0 - distance.
-        # But the decision is made on distance <= threshold.
-        # To reuse the contract "score >= threshold -> PASS", we can map:
-        # User configures distance threshold (e.g. 0.35).
-        # We need to map this to a score threshold.
-        # If distance threshold is 0.35, then score threshold should be 0.65?
-        # WAIT: The caller (InspectionWorker) passes a threshold.
-        # If the user sets 0.35 distance threshold, the passed threshold variable here is 0.35.
-        # But `perform_inspection` usually compares `score >= threshold`.
-        # If we return `score = 1 - distance`, then we should compare `score >= (1 - threshold)`.
-        # OR we change the logic here to explicitly use distance.
-        
-        # However, the `threshold` argument passed in `perform_inspection` comes from config.
-        # If the config is "0.35", and we interpret it as distance threshold:
-        # PASS if distance <= 0.35
-        # This is equivalent to (1 - distance) >= (1 - 0.35) -> score >= 0.65.
-        
-        # Let's assume the passed `threshold` is the raw config value (0.35).
-        # We will compute `score = 1.0 - distance`.
-        # So we want `1.0 - distance >= 1.0 - threshold` ?? No.
-        # The prompt says: "PASS if best_distance <= DISTANCE_THRESHOLD".
-        # It also says: "best_score: float # use (1 - distance) for UI consistency".
-        
-        # So if threshold is 0.35:
-        # Distance 0.1 -> Score 0.9. PASS. (0.1 <= 0.35)
-        # Distance 0.5 -> Score 0.5. FAIL. (0.5 > 0.35)
-        
-        # If the system logic outside this function checks `result.passed`, we are good.
-        # If the system logic outside *also* checks `score >= threshold`, we have a mismatch if we don't align.
-        # But `perform_inspection` returns `passed` boolean. We should rely on that.
-        
         score_val = 1.0 - distance
         scores[ref_id] = score_val
         
@@ -375,34 +352,130 @@ def _perform_embedding_inspection(
         heatmap=None # No heatmap for embedding
     )
 
+def _perform_hybrid_inspection(
+    captured_img: np.ndarray,
+    reference_images: Dict[str, np.ndarray],
+    roi_coords: Dict[str, int],
+    threshold: float,
+    dataset_version: str
+) -> InspectionResult:
+    """
+    Hybrid inspection: ORB Gate -> Embedding.
+    """
+    # STAGE 1: ORB Gate
+    orb_result = _perform_orb_inspection(
+        captured_img,
+        reference_images,
+        roi_coords,
+        ORB_GATE_THRESHOLD, # Locked constant
+        dataset_version
+    )
+
+    if not orb_result.passed:
+        # ORB FAIL -> Immediate Final FAIL
+        orb_result.orb_passed = False
+        orb_result.embedding_passed = None # Not run
+        orb_result.decision_path = "ORB_REJECT"
+        return orb_result
+
+    # ORB PASS -> Continue to Embedding
+
+    # STAGE 2: Embedding Inspection
+    emb_result = _perform_embedding_inspection(
+        captured_img,
+        reference_images,
+        roi_coords,
+        threshold, # Passed threshold applies to embedding
+        dataset_version
+    )
+
+    # Augment result with Hybrid info
+    emb_result.orb_passed = True
+    emb_result.embedding_passed = emb_result.passed
+
+    if emb_result.passed:
+        emb_result.decision_path = "EMBEDDING_ACCEPT"
+    else:
+        emb_result.decision_path = "EMBEDDING_REJECT"
+
+    return emb_result
+
 def perform_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
     roi_coords: Dict[str, int],
     threshold: float,
     dataset_version: str,
-    method: str = "orb" # This might be overridden by internal default logic if we want Embedding to be default
+    method: str = "hybrid" # Changed default to reflect intent, but handled via Env var mostly
 ) -> InspectionResult:
     """
     Performs deterministic inspection.
+    Dispatches based on INSPECTION_METHOD env var or method argument.
     """
-    # Force default to embedding if not specified or if strictly "orb" not requested?
-    # The prompt says "Embedding method becomes default".
-    # Caller might still pass "orb" if they haven't been updated, or "embedding".
-    # If the caller (CameraWorker) uses a config that defaults to "embedding", then `method` arg will be "embedding".
-    # If I change the default in function signature `method="embedding"`, it helps.
-    # But let's check what method string is passed.
+    env_method = os.environ.get("INSPECTION_METHOD", "").lower()
+
+    # Priority: Env Var > Argument (if arg matches intent? No, usually Arg overrides Env,
+    # but the requirement says INSPECTION_METHOD dictates logic).
+    # "INSPECTION_METHOD=orb -> Step 7 ORB only"
+    # "INSPECTION_METHOD unset -> Hybrid (default)"
+
+    # If the caller passes "orb" or "embedding" explicitly (like UI might), should we honor it?
+    # The requirement says "INSPECTION_METHOD unset -> Step 9 Hybrid".
+    # And "Do not pass threshold through perform_inspection for ORB" (Wait, that was for hybrid construction).
+
+    # Let's assume if env var is set, it wins. If not, check method arg.
+    # If method arg is also default/unset, use Hybrid.
+
+    # However, existing calls might pass "embedding".
+    # If env var is unset, and method="embedding" (from window.py), should we force Hybrid?
+    # "Default -> Step 9 hybrid logic"
+    # "INSPECTION_METHOD unset -> Step 9 Hybrid (default)"
     
-    if method.lower() == "embedding":
+    # But window.py is calling it with method="embedding".
+    # If I don't change window.py, it will keep asking for embedding.
+    # The user instructions said: "INSPECTION_METHOD unset -> Step 9 Hybrid".
+    # This implies that even if `method` arg says "embedding", if env is unset, we might want Hybrid?
+    # Or should I change `window.py` to NOT pass "embedding"?
+    # Modifying `window.py` was part of my plan (to update log data).
+    # I should also update `window.py` to NOT hardcode "embedding" or pass "hybrid" or rely on default.
+
+    # Logic implementation:
+    active_method = "hybrid" # Default
+
+    if env_method == "orb":
+        active_method = "orb"
+    elif env_method == "embedding":
+        active_method = "embedding"
+    else:
+        # Env unset or unknown -> Hybrid
+        # Check explicit method arg if provided and not default?
+        # If the caller passed "ssim", maybe we should respect it?
+        if method == "ssim":
+            active_method = "ssim"
+        elif method == "orb" and not env_method:
+            active_method = "orb"
+        elif method == "embedding" and not env_method:
+            # Here is the catch. Window.py currently passes "embedding".
+            # If I don't change window.py, and env is unset, do we run Hybrid?
+            # User said "INSPECTION_METHOD unset -> Hybrid".
+            # So I should probably treat method="embedding" as eligible for Hybrid override if env is unset?
+            # OR better: I will change window.py to pass `method="hybrid"` or remove the arg.
+            # I will assume for `perform_inspection`, if env is unset, "hybrid" is the target.
+            active_method = "hybrid"
+
+    if active_method == "orb":
+        return _perform_orb_inspection(
+            captured_img, reference_images, roi_coords, threshold, dataset_version
+        )
+    elif active_method == "embedding":
         return _perform_embedding_inspection(
             captured_img, reference_images, roi_coords, threshold, dataset_version
         )
-    elif method.lower() == "ssim":
+    elif active_method == "ssim":
         return _perform_ssim_inspection(
             captured_img, reference_images, roi_coords, threshold, dataset_version
         )
     else:
-        # Default to ORB for "orb" or unknown
-        return _perform_orb_inspection(
+        return _perform_hybrid_inspection(
             captured_img, reference_images, roi_coords, threshold, dataset_version
         )

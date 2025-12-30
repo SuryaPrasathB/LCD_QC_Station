@@ -18,9 +18,10 @@
 The system is built on a modular "Hardware Abstraction Layer" architecture to support both the target hardware (Raspberry Pi) and developer environments (PC).
 
 *   **Camera & ROI:** Uses `Picamera2` for hardware control. Strict 4:3 aspect ratio is enforced to guarantee identical Field of View (FOV) between low-resolution previews and high-resolution captures.
-*   **Inspection Pipeline:**
-    *   **Primary:** Deep Learning Embedding (MobileNetV2 via ONNX). Calculates Cosine Distance between the captured Region of Interest (ROI) and reference embeddings.
-    *   **Fallback:** ORB (Oriented FAST and Rotated BRIEF) feature matching for environments where ML inference is not suitable.
+*   **Inspection Pipeline (Hybrid):**
+    *   **Stage 1 (Gate):** ORB Feature Matching acts as a fast rejection gate (threshold 0.50). Obvious defects are rejected immediately.
+    *   **Stage 2 (Decision):** Deep Learning Embedding (MobileNetV2 via ONNX) acts as the final quality authority.
+    *   **Traceability:** Decisions are logged with their path (e.g., `ORB_REJECT`, `EMBEDDING_ACCEPT`).
 *   **Offline vs Online:**
     *   **Online (Pi):** Inference only. No model weight updates.
     *   **Offline (PC):** Training and Dataset Management.
