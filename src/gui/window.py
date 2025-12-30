@@ -279,13 +279,14 @@ class MainWindow(QMainWindow):
             threshold = 0.35
 
             # Method is now "embedding" by default for Step 8
+            # STEP 9 Update: Use default "hybrid" (unset) or respect env var.
+            # We omit the method argument so it defaults to hybrid or env logic.
             result = perform_inspection(
                 captured_img,
                 reference_images,
                 roi_data,
                 threshold,
-                dataset_version,
-                method="embedding"
+                dataset_version
             )
 
             # Generate ID and Record
@@ -299,7 +300,10 @@ class MainWindow(QMainWindow):
                 "all_scores": result.all_scores,
                 "roi": roi_data,
                 "threshold": threshold,
-                "dataset_version": dataset_version
+                "dataset_version": dataset_version,
+                "orb_passed": result.orb_passed,
+                "embedding_passed": result.embedding_passed,
+                "decision_path": result.decision_path
             }
 
             # Save to dataset (persisted inspection)

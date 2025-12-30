@@ -218,12 +218,19 @@ The system defaults to **Embedding (ML)** inspection.
 
 You can change behavior using Environment Variables:
 
-*   **Force ORB Method:**
+*   **Hybrid Inspection (Default):**
+    If `INSPECTION_METHOD` is unset, the system uses the **Hybrid Pipeline**:
+    1.  **ORB Gate:** Fast check to reject obvious garbage.
+    2.  **Embedding Inspection:** "Expert" check for final decision.
+
+    *Flow:* `Capture -> ORB (Pass/Fail) -> If Pass -> Embedding (Pass/Fail) -> Final Result`
+
+*   **Force ORB Method (Legacy):**
     ```bash
     export INSPECTION_METHOD=orb
     python3 src/main.py
     ```
-*   **Force Embedding Method:**
+*   **Force Embedding Method (Step 8 Logic):**
     ```bash
     export INSPECTION_METHOD=embedding
     python3 src/main.py
