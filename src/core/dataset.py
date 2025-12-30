@@ -3,7 +3,7 @@ import json
 import shutil
 import uuid
 from datetime import datetime
-from typing import Dict, Optional, Tuple, List, Union
+from typing import Dict, Optional, Tuple, List, Union, Any
 from dataclasses import dataclass
 
 @dataclass
@@ -14,7 +14,7 @@ class OverrideRecord:
     score: float
     timestamp: str
     image_path: str
-    roi: List[int] # Deprecated or needs update? We'll keep raw [x,y,w,h] of failing ROI if possible, or just ignore for multi-ROI logging?
+    roi: Any # Can be List[int] (legacy) or Dict (multi-roi)
 
 class DatasetManager:
     """
@@ -123,14 +123,13 @@ class DatasetManager:
                         ref_id = os.path.splitext(f)[0]
                         roi_refs[ref_id] = os.path.join(item_path, f)
 
+                # Even if empty, we might want to know it exists?
+                # But inspection needs images.
                 if roi_refs:
                     refs[roi_id] = roi_refs
                     has_subdirs = True
 
         # 2. Check for Root References (Legacy)
-        # If we found subdirs, we generally ignore root refs unless we want mixed mode?
-        # Requirement: "Code must detect legacy... treat as single ROI named 'main'".
-        # If we have subdirs, we assume new structure. If NO subdirs, we look for legacy files.
         if not has_subdirs:
             legacy_refs = {}
             for f in os.listdir(v_path):
@@ -156,12 +155,6 @@ class DatasetManager:
         roi_dir = os.path.join(v_path, roi_id)
         os.makedirs(roi_dir, exist_ok=True)
 
-        # Generate a filename (or use source name?)
-        # For initial setup, we often just want one reference.
-        # Let's use 'ref_001.png' as default for initial.
-        # But if we append, we need unique names.
-        # Requirement: "ref_001.png", "ref_002.png".
-
         existing = [f for f in os.listdir(roi_dir) if f.startswith("ref_")]
         count = len(existing) + 1
         filename = f"ref_{count:03d}.png"
@@ -184,10 +177,9 @@ class DatasetManager:
 
         for item in os.listdir(v_path):
             item_path = os.path.join(v_path, item)
-            # Don't delete dataset metadata if any (though currently version file is outside)
+            # Don't delete dataset metadata if any
             if item == "roi.json":
-                continue # Handled by ROIManager usually, but here we might want to wipe everything?
-                         # ROIManager.clear_roi calls this.
+                continue
 
             try:
                 if os.path.isdir(item_path):
@@ -198,7 +190,6 @@ class DatasetManager:
                 print(f"Error clearing path {item_path}: {e}")
 
     def save_inspection(self, inspection_id: str, image: bytes, result_data: Dict) -> str:
-        # Placeholder compatible with previous interface, though unused?
         pass
 
     def record_inspection(self, inspection_id: str, source_image_path: str, result_data: Dict) -> str:
@@ -307,9 +298,6 @@ class DatasetManager:
         os.makedirs(new_version_path, exist_ok=True)
 
         # 2. Copy Base Reference Files & Structure
-        # We need to copy roi.json and ALL reference subdirectories from old version.
-        # This ensures we don't lose existing references for unchanged ROIs.
-
         # Copy roi.json
         roi_src = os.path.join(old_version_path, "roi.json")
         if os.path.exists(roi_src):
@@ -324,10 +312,8 @@ class DatasetManager:
             dst_path = os.path.join(new_version_path, item)
 
             if os.path.isdir(src_path):
-                # Recursively copy ROI folder
                 shutil.copytree(src_path, dst_path)
             elif os.path.isfile(src_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
-                # Legacy root file copy
                 shutil.copy(src_path, dst_path)
 
         # 3. Process Pending Overrides
@@ -346,91 +332,59 @@ class DatasetManager:
                 with open(p_file, 'r') as pf:
                     record = json.load(pf)
 
-                # record['image_path'] is the path to the FULL captured image in inspections/
-                src_img_path = record.get('image_path') # This might be filename only if relative?
-
-                # record_inspection saves 'image_path' as filename in JSON?
-                # "image_path": image_filename
-                # So we need to resolve it relative to inspections dir.
+                # Resolve image path
+                src_img_path = record.get('image_path')
                 if not os.path.isabs(src_img_path):
-                    src_img_path = os.path.join(self.inspections_path, src_img_path)
+                    # Try resolving relative to CWD
+                    if not os.path.exists(src_img_path):
+                        # Try inside inspections
+                        candidate = os.path.join(self.inspections_path, os.path.basename(src_img_path))
+                        if os.path.exists(candidate):
+                             src_img_path = candidate
 
                 if not os.path.exists(src_img_path):
+                    print(f"Skipping override {p_file}: Image not found at {src_img_path}")
                     continue
-
-                # We need to crop the ROI from this image and save it to the correct ROI folder.
-                # The record has 'roi', but is it the SINGLE failing ROI or the full ROI struct?
-                # The override record schema: "roi": List[int] (x,y,w,h).
-                # But in Multi-ROI, which ROI failed?
-                # The override happens on the *result*.
-                # If we have multiple ROIs, we need to know WHICH one to update?
-                # The current OverrideRecord struct is insufficient for Multi-ROI granularity
-                # UNLESS we assume we learn for ALL ROIs? Or the user overrides the whole result?
-                # Wait, the prompt says "Operator overrides... False Negatives... enter pending pool".
-                # For Multi-ROI, if the system says FAIL (because ROI_1 failed), and operator says PASS.
-                # This means ROI_1 was actually okay. So we should add ROI_1's crop to ROI_1's ref set.
-                # BUT, we might not know which ROI caused the failure easily from just `roi` field if it was just [x,y,w,h].
-                # Actually, Step 10 spec says "ROI Data Model... rois: [{id...}]".
-                # The OverrideRecord currently stores "roi": record.roi.
-                # In `window.py`, ctx['roi'] was storing `[x,y,w,h]` (the flat list).
-                # With Multi-ROI, `window.py` will likely store the full ROI list or the specific ROI?
-                # The prompt is silent on updating OverrideRecord schema, but we should make it work.
-
-                # Assumption: For this step, we might skip complex learning logic refactoring if not explicitly asked,
-                # BUT "Commit Learning action generates a new immutable dataset version".
-                # If we don't fix this, learning won't work for Multi-ROI.
-                # However, the prompt says "Multi-ROI does NOT mean... Runtime ROI changes".
-                # It does say "Learning & Override... Complete and Locked" as Step 5.
-                # Step 10 Goal is "Multi-ROI Inspection".
-                # "Commit Learning" copies original reference and accepted override images.
-
-                # For now, let's implement a best-effort approach:
-                # If the record contains a single [x,y,w,h], it's legacy or specific.
-                # If we update `window.py` to store the *full* ROI info in the record, we can re-process.
-                # But to slice, we need to load the image.
 
                 import cv2
                 img = cv2.imread(src_img_path)
                 if img is None:
+                    print(f"Skipping override {p_file}: Failed to read image")
                     continue
 
-                # We need to know which ROI this override applies to.
-                # If the Operator says PASS, it means *ALL* ROIs are valid.
-                # So we should probably add the crop for *EVERY* defined ROI to its respective folder.
-                # This assumes the user verified the whole display.
-
-                # We need the ROI definitions at the time of inspection.
-                # `record['roi']` in `window.py` will be the `cached_roi_data` (the dict with "rois" list).
-
                 roi_data = record.get('roi')
-                if isinstance(roi_data, list):
-                    # Legacy [x,y,w,h]
-                    pass # Hard to map to "digits_main" without assumption
-                elif isinstance(roi_data, dict) and "rois" in roi_data:
-                    # New Multi-ROI
+                # Support new Multi-ROI structure
+                if isinstance(roi_data, dict) and "rois" in roi_data:
                     for r in roi_data["rois"]:
                         rid = r["id"]
                         rx, ry, rw, rh = r["x"], r["y"], r["w"], r["h"]
 
+                        # Validate bounds
+                        if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
+                            print(f"Skipping ROI {rid}: Bounds invalid {rx},{ry},{rw},{rh} for img {img.shape}")
+                            continue
+
                         # Crop
                         crop = img[ry:ry+rh, rx:rx+rw]
-
-                        # Save to new version
-                        # We use `save_roi_reference` but point to new version?
-                        # `save_roi_reference` uses `get_active_version_path` which is currently OLD version until we flip.
-                        # We are constructing the new version folder manually here.
 
                         target_dir = os.path.join(new_version_path, rid)
                         os.makedirs(target_dir, exist_ok=True)
 
-                        existing = len([f for f in os.listdir(target_dir) if f.startswith("learned_")])
                         fname = f"learned_{uuid.uuid4().hex[:8]}.png"
                         cv2.imwrite(os.path.join(target_dir, fname), crop)
 
+                    # We count this record as learned
                     learned_count += 1
+
+                # Legacy handling (single roi list [x,y,w,h])
+                elif isinstance(roi_data, list) and len(roi_data) == 4:
+                     # This is ambiguous in multi-roi context, but likely "digits_main" if migrating
+                     pass
 
             except Exception as e:
                 print(f"Error processing pending file {p_file}: {e}")
+                import traceback
+                traceback.print_exc()
 
         # 4. Clear Pending
         if os.path.exists(self.pending_file_path):
@@ -443,8 +397,5 @@ class DatasetManager:
         return True, f"Committed {learned_count} overrides to {new_version}."
 
     def ensure_active_version_writable(self):
-        """
-        Ensures the active version folder exists.
-        """
         path = self.get_active_version_path()
         os.makedirs(path, exist_ok=True)
