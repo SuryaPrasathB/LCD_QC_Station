@@ -271,15 +271,21 @@ class MainWindow(QMainWindow):
             dataset_version = self.dataset_manager.active_version
 
             # Feature-based threshold (0.25) as per Step 7 requirements
-            threshold = 0.25
+            # Step 8: Default threshold for embedding is 0.35 distance
+            # If we are using ORB (explicitly or fallback), we might want 0.25 score.
+            # But the single threshold config variable is tricky.
+            # Let's set default threshold to 0.35 for embedding.
+            # Ideally this should be in config.
+            threshold = 0.35
 
+            # Method is now "embedding" by default for Step 8
             result = perform_inspection(
                 captured_img,
                 reference_images,
                 roi_data,
                 threshold,
                 dataset_version,
-                method="orb"
+                method="embedding"
             )
 
             # Generate ID and Record
