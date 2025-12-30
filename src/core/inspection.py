@@ -71,24 +71,24 @@ def _perform_ssim_inspection(
         if ref_h < h or ref_w < w:
             continue
 
-        # ROI from ref (assuming ref is the crop itself? Step 10 says "Reference images are stored inside ROI-named folders".
-        # Yes, so ref_img IS the cropped reference.)
-        # Wait, if ref_img IS the crop, we don't need to slice it using x,y.
-        # BUT, legacy code sliced it.
-        # "Reference images are stored inside ROI-named folders".
-        # "Capture once on Save ... Crop the frame ... Save as initial reference".
-        # So the stored image IS the ROI.
-        # So we should compare `roi_cap` to `ref_img` directly (maybe resize if minor off by 1?)
-        # Step 10 spec: "For each ROI: Extract ROI from captured image ... Run ORB".
+        # Detect legacy full-frame reference
+        # If ref is significantly larger than ROI, assume it's a full-frame image and crop it.
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop the reference using the ROI coordinates
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  # ROI outside reference bounds? Fallback to resize or skip
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode: Reference is already cropped
+             ref_roi = ref_img
 
-        # Assumption: Reference images in ROI folders are PRE-CROPPED.
-        # So we do NOT crop `ref_img` using x,y.
+        # Ensure exact size match for SSIM
+        if ref_roi.shape != roi_cap.shape:
+             ref_roi = cv2.resize(ref_roi, (w, h))
 
-        # Check sizes. If exact match is required for SSIM:
-        if ref_img.shape != roi_cap.shape:
-             ref_img = cv2.resize(ref_img, (w, h))
-
-        gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+        gray_ref = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY)
         gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
         score, diff = ssim(gray_ref, gray_cap, data_range=255, full=True)
@@ -141,6 +141,10 @@ def _perform_orb_inspection(
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     kp_cap, des_cap = orb.detectAndCompute(gray_cap, None)
+
+    # Debug Logging
+    print(f"DEBUG: ROI {roi_id}: Capture Features: {len(kp_cap) if kp_cap else 0}")
+
     if des_cap is None:
         return ROIResult(roi_id, False, 0.0, "none", "ORB_NO_FEATURES")
 
@@ -150,18 +154,34 @@ def _perform_orb_inspection(
     best_heatmap = None
 
     for ref_id, ref_img in reference_images.items():
-        # ref_img is pre-cropped.
-        gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+        ref_h, ref_w = ref_img.shape[:2]
+
+        # Detect legacy full-frame reference
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode
+             ref_roi = ref_img
+
+        gray_ref = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY)
         gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
         kp_ref, des_ref = orb.detectAndCompute(gray_ref, None)
+
+        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Features: {len(kp_ref) if kp_ref else 0}")
+
         if des_ref is None or len(des_ref) == 0:
             scores[ref_id] = 0.0
             continue
 
         try:
             matches = bf.knnMatch(des_ref, des_cap, k=2)
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG: ROI {roi_id}: ORB match error: {e}")
             scores[ref_id] = 0.0
             continue
 
@@ -175,6 +195,8 @@ def _perform_orb_inspection(
         denom = min(len(des_ref), len(des_cap))
         score = len(good) / denom if denom > 0 else 0.0
         scores[ref_id] = score
+
+        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Score {score:.4f} ({len(good)} matches)")
 
         if score > best_score:
             best_score = score
@@ -240,19 +262,21 @@ def _perform_embedding_inspection(
     best_ref_id = "none"
 
     for ref_id, ref_img in reference_images.items():
-        # ref_img is pre-cropped.
-        # Get/Cache Reference Embedding
-        # The cache key needs to include roi_id now?
-        # `get_reference_embedding` uses dataset_version + filename.
-        # Filename is usually unique enough if it includes path?
-        # `get_reference_embedding(dataset_version, ref_id, ref_img)`
-        # `ref_id` comes from dict keys. In `DatasetManager`, ref_id was just filename base (e.g. "ref_001").
-        # This collides across ROIs! ("digits_main/ref_001" vs "icon/ref_001").
-        # We MUST ensure the key is unique.
-        # We should probably pass `f"{roi_id}/{ref_id}"` as the key to `get_reference_embedding`.
+        ref_h, ref_w = ref_img.shape[:2]
+
+        # Detect legacy full-frame reference
+        if ref_h > h * 1.5 or ref_w > w * 1.5:
+             # Legacy Mode: Crop
+             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+                  ref_roi = cv2.resize(ref_img, (w, h))
+             else:
+                  ref_roi = ref_img[y:y+h, x:x+w]
+        else:
+             # Modern Mode
+             ref_roi = ref_img
 
         unique_ref_key = f"{roi_id}/{ref_id}"
-        emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_img)
+        emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi)
         if emb_ref is None:
             continue
             
@@ -354,7 +378,7 @@ def perform_inspection(
             # No references for this ROI -> FAIL or SKIP?
             # "Final PASS requires all ROIs to PASS".
             # If no reference, we can't pass.
-            logger.warning(f"No references found for ROI {roi_id}")
+            print(f"DEBUG: No references found for ROI {roi_id}")
             roi_results[roi_id] = ROIResult(
                 roi_id, False, 0.0, "none", "NO_REFERENCES"
             )

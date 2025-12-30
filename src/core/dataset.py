@@ -297,13 +297,21 @@ class DatasetManager:
 
         os.makedirs(new_version_path, exist_ok=True)
 
-        # 2. Copy Base Reference Files & Structure
+        # 2. Copy Base Reference Files & Structure (with Migration)
+        # Check if old version is legacy (has root images)
+        is_legacy = False
+        legacy_files = []
+        for item in os.listdir(old_version_path):
+             if item.lower().endswith(('.png', '.jpg', '.jpeg')) and os.path.isfile(os.path.join(old_version_path, item)):
+                 is_legacy = True
+                 legacy_files.append(item)
+
         # Copy roi.json
         roi_src = os.path.join(old_version_path, "roi.json")
         if os.path.exists(roi_src):
             shutil.copy(roi_src, os.path.join(new_version_path, "roi.json"))
 
-        # Copy Reference Folders / Files
+        # Copy Data
         for item in os.listdir(old_version_path):
             if item == "roi.json" or item == "dataset_version.json":
                 continue
@@ -312,9 +320,21 @@ class DatasetManager:
             dst_path = os.path.join(new_version_path, item)
 
             if os.path.isdir(src_path):
+                # Copy existing ROI folders as-is
                 shutil.copytree(src_path, dst_path)
             elif os.path.isfile(src_path) and item.lower().endswith(('.png', '.jpg', '.jpeg')):
-                shutil.copy(src_path, dst_path)
+                if is_legacy:
+                    # MIGRATE: Move root image to digits_main folder
+                    target_dir = os.path.join(new_version_path, "digits_main")
+                    os.makedirs(target_dir, exist_ok=True)
+                    shutil.copy(src_path, os.path.join(target_dir, item))
+                else:
+                    # Should not happen in pure multi-roi, but copy anyway if exists?
+                    # If we have root images but not "legacy" mode? (Mixed state).
+                    # Treat as legacy for safety.
+                    target_dir = os.path.join(new_version_path, "digits_main")
+                    os.makedirs(target_dir, exist_ok=True)
+                    shutil.copy(src_path, os.path.join(target_dir, item))
 
         # 3. Process Pending Overrides
         try:
@@ -378,8 +398,21 @@ class DatasetManager:
 
                 # Legacy handling (single roi list [x,y,w,h])
                 elif isinstance(roi_data, list) and len(roi_data) == 4:
-                     # This is ambiguous in multi-roi context, but likely "digits_main" if migrating
-                     pass
+                     # Map to default "digits_main"
+                     rid = "digits_main"
+                     rx, ry, rw, rh = roi_data[0], roi_data[1], roi_data[2], roi_data[3]
+
+                     if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
+                         print(f"Skipping Legacy ROI {rid}: Bounds invalid")
+                         continue
+
+                     crop = img[ry:ry+rh, rx:rx+rw]
+                     target_dir = os.path.join(new_version_path, rid)
+                     os.makedirs(target_dir, exist_ok=True)
+
+                     fname = f"learned_{uuid.uuid4().hex[:8]}.png"
+                     cv2.imwrite(os.path.join(target_dir, fname), crop)
+                     learned_count += 1
 
             except Exception as e:
                 print(f"Error processing pending file {p_file}: {e}")

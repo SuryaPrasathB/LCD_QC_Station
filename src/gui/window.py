@@ -191,6 +191,17 @@ class MainWindow(QMainWindow):
         # Reset visual status of ROIs to 'none' (blue)
         self.reset_roi_visuals()
 
+    def handle_error(self, error_msg):
+        """
+        Handles errors reported by the CameraWorker.
+        """
+        self.image_label.setText(f"Error: {error_msg}")
+        QMessageBox.critical(self, "Camera Error", f"An error occurred:\n{error_msg}")
+        # Stop worker if running
+        if self.worker:
+            self.worker.stop()
+            self.worker = None
+
     def handle_capture_click(self):
         """
         Transition from LIVE_VIEW to CAPTURED (via async capture).
@@ -254,6 +265,7 @@ class MainWindow(QMainWindow):
         # Now returns nested dict: {roi_id: {ref_id: path}}
         ref_paths_map = self.dataset_manager.get_active_references()
         if not ref_paths_map:
+             print("DEBUG: No references found in dataset manager.")
              self.lbl_inspection_result.setText("No References")
              return
 
@@ -267,6 +279,7 @@ class MainWindow(QMainWindow):
             # Load all reference images per ROI
             reference_images_nested = {}
             for roi_id, ref_dict in ref_paths_map.items():
+                print(f"DEBUG: Loading refs for ROI {roi_id}: {list(ref_dict.keys())}")
                 roi_refs = {}
                 for r_id, r_path in ref_dict.items():
                     r_img = cv2.imread(r_path)
@@ -554,6 +567,9 @@ class MainWindow(QMainWindow):
             full_img = cv2.imread("/tmp/capture.jpg")
             if full_img is None:
                 raise Exception("Could not read capture file")
+
+            # Clear existing references for the active version to avoid pollution/accumulation
+            self.dataset_manager.clear_active_references()
 
             # For each ROI, crop and save
             for r_def in rois_to_save:
