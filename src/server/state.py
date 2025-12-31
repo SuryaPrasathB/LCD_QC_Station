@@ -11,7 +11,7 @@ import asyncio
 from camera.real_camera import RealCamera
 from camera.mock_camera import MockCamera
 from core.dataset import DatasetManager, OverrideRecord
-from core.migration import migrate_legacy_structure
+from src.core.migration import migrate_legacy_structure
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
 from core.roi_model import normalize_roi
