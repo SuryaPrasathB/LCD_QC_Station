@@ -6,6 +6,7 @@ from skimage.metrics import structural_similarity as ssim
 import logging
 import os
 from src.core.embedding import EmbeddingModel
+from src.core.roi_model import NormalizedROI, normalize_roi
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +44,14 @@ class InspectionResult:
 def _perform_ssim_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_rect: Dict[str, int],
+    roi: NormalizedROI,
     threshold: float,
 ) -> ROIResult:
     """
     Legacy SSIM-based inspection for a SINGLE ROI.
     """
-    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
-    roi_id = roi_rect.get('id', 'unknown')
+    x, y, w, h = roi.x, roi.y, roi.w, roi.h
+    roi_id = roi.id
     img_h, img_w = captured_img.shape[:2]
 
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
@@ -119,14 +120,14 @@ def _perform_ssim_inspection(
 def _perform_orb_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_rect: Dict[str, int],
+    roi: NormalizedROI,
     threshold: float,
 ) -> ROIResult:
     """
     ORB inspection for a SINGLE ROI.
     """
-    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
-    roi_id = roi_rect.get('id', 'unknown')
+    x, y, w, h = roi.x, roi.y, roi.w, roi.h
+    roi_id = roi.id
 
     # Extract ROI from Capture
     img_h, img_w = captured_img.shape[:2]
@@ -232,7 +233,7 @@ def _perform_orb_inspection(
 def _perform_embedding_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_rect: Dict[str, int],
+    roi: NormalizedROI,
     threshold: float,
     dataset_version: str
 ) -> ROIResult:
@@ -240,12 +241,12 @@ def _perform_embedding_inspection(
     Embedding inspection for a SINGLE ROI.
     """
     model = EmbeddingModel.get_instance()
-    x, y, w, h = roi_rect['x'], roi_rect['y'], roi_rect['w'], roi_rect['h']
-    roi_id = roi_rect.get('id', 'unknown')
+    x, y, w, h = roi.x, roi.y, roi.w, roi.h
+    roi_id = roi.id
 
     if model.session is None:
         # Fallback to ORB if model missing (unlikely in prod but safe)
-        return _perform_orb_inspection(captured_img, reference_images, roi_rect, 0.75)
+        return _perform_orb_inspection(captured_img, reference_images, roi, 0.75)
 
     img_h, img_w = captured_img.shape[:2]
     if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
@@ -309,7 +310,7 @@ def _perform_embedding_inspection(
 def _perform_hybrid_inspection(
     captured_img: np.ndarray,
     reference_images: Dict[str, np.ndarray],
-    roi_rect: Dict[str, int],
+    roi: NormalizedROI,
     threshold: float,
     dataset_version: str
 ) -> ROIResult:
@@ -317,7 +318,7 @@ def _perform_hybrid_inspection(
     Hybrid inspection for a SINGLE ROI.
     """
     # 1. ORB Gate
-    orb_res = _perform_orb_inspection(captured_img, reference_images, roi_rect, ORB_GATE_THRESHOLD)
+    orb_res = _perform_orb_inspection(captured_img, reference_images, roi, ORB_GATE_THRESHOLD)
 
     if not orb_res.passed:
         orb_res.decision_path = "ORB_REJECT"
@@ -326,16 +327,10 @@ def _perform_hybrid_inspection(
         return orb_res
 
     # 2. Embedding
-    emb_res = _perform_embedding_inspection(captured_img, reference_images, roi_rect, threshold, dataset_version)
+    emb_res = _perform_embedding_inspection(captured_img, reference_images, roi, threshold, dataset_version)
 
     emb_res.orb_passed = True
     emb_res.embedding_passed = emb_res.passed
-
-    # Preserve ORB visualization if embedding fails? Or just use Embedding result?
-    # Embedding doesn't have heatmap. We might want to keep ORB heatmap for context?
-    # Spec says "heatmap... contains RGB visualization... when using ORB".
-    # If Embedding passes, we don't have heatmap.
-    # If we want to show why it passed/failed, maybe keep ORB heatmap if available.
     emb_res.heatmap = orb_res.heatmap
 
     if emb_res.passed:
@@ -345,6 +340,44 @@ def _perform_hybrid_inspection(
 
     return emb_res
 
+def inspect_roi(
+    captured_img: np.ndarray,
+    refs: Dict[str, np.ndarray],
+    roi: NormalizedROI,
+    threshold: float,
+    dataset_version: str,
+    method: str
+) -> ROIResult:
+    """
+    Type-aware inspection router.
+    Currently maps all types to the same method, but prepares for future specialization.
+    """
+    # Force method from argument (env var) if present, but we can also switch on type here
+    # The requirement is: "if roi.type == DIGIT... return inspect_...".
+
+    # We use the 'method' argument as the base strategy (orb, embedding, hybrid)
+    # But effectively we call the same underlying functions for now.
+
+    if roi.type == "DIGIT":
+        # Call dispatcher
+        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+    elif roi.type == "ICON":
+        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+    elif roi.type == "TEXT":
+        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+    else:
+        # Fallback
+        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+
+def _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method):
+    if method == "orb":
+        return _perform_orb_inspection(captured_img, refs, roi, threshold)
+    elif method == "embedding":
+        return _perform_embedding_inspection(captured_img, refs, roi, threshold, dataset_version)
+    elif method == "ssim":
+         return _perform_ssim_inspection(captured_img, refs, roi, threshold)
+    else:
+         return _perform_hybrid_inspection(captured_img, refs, roi, threshold, dataset_version)
 
 def perform_inspection(
     captured_img: np.ndarray,
@@ -356,58 +389,39 @@ def perform_inspection(
     """
     Main entry point for Multi-ROI inspection.
     """
-    rois = roi_data_full.get("rois", [])
+    raw_rois = roi_data_full.get("rois", [])
     
     roi_results: Dict[str, ROIResult] = {}
 
     # Strategy Determination (Global env var applies to all ROIs)
     env_method = os.environ.get("INSPECTION_METHOD", "hybrid").lower()
 
-    for roi in rois:
-        roi_id = roi["id"]
+    for r_dict in raw_rois:
+        # NORMALIZE ROI HERE
+        roi_id = r_dict["id"]
+        roi = normalize_roi(roi_id, r_dict)
 
-        # Get references for this ROI
-        # If legacy, `reference_images_nested` might just be {ref_id: img} if caller didn't adapt?
-        # We rely on caller (MainWindow) to pass correct structure.
-        # But wait, MainWindow calls `dataset.get_active_references` which we updated.
-        # It returns `{roi_id: {ref_id: img}}`.
-
-        refs = reference_images_nested.get(roi_id, {})
+        refs = reference_images_nested.get(roi.id, {})
 
         if not refs:
-            # No references for this ROI -> FAIL or SKIP?
-            # "Final PASS requires all ROIs to PASS".
-            # If no reference, we can't pass.
-            print(f"DEBUG: No references found for ROI {roi_id}")
-            roi_results[roi_id] = ROIResult(
-                roi_id, False, 0.0, "none", "NO_REFERENCES"
+            print(f"DEBUG: No references found for ROI {roi.id}")
+            roi_results[roi.id] = ROIResult(
+                roi.id, False, 0.0, "none", "NO_REFERENCES"
             )
             continue
 
-        # Dispatch
-        if env_method == "orb":
-            res = _perform_orb_inspection(captured_img, refs, roi, threshold)
-        elif env_method == "embedding":
-            res = _perform_embedding_inspection(captured_img, refs, roi, threshold, dataset_version)
-        elif env_method == "ssim":
-             res = _perform_ssim_inspection(captured_img, refs, roi, threshold)
-        else:
-             res = _perform_hybrid_inspection(captured_img, refs, roi, threshold, dataset_version)
-
-        roi_results[roi_id] = res
+        # Use Router
+        res = inspect_roi(captured_img, refs, roi, threshold, dataset_version, env_method)
+        roi_results[roi.id] = res
 
     # Final Decision
-    # "If any ROI fails -> Final FAIL"
     passed = all(r.passed for r in roi_results.values()) if roi_results else False
 
-    # Aggregates for legacy fields
-    # Score = min score (bottleneck)
     if not roi_results:
         min_score = 0.0
         worst_roi = None
     else:
         min_score = min(r.best_score for r in roi_results.values())
-        # Find the worst ROI for metadata
         worst_roi = min(roi_results.values(), key=lambda r: r.best_score)
 
     return InspectionResult(
@@ -417,7 +431,7 @@ def perform_inspection(
         score=min_score,
         best_score=min_score,
         best_reference_id=worst_roi.best_reference_id if worst_roi else "none",
-        all_scores={}, # Flattening is ambiguous
+        all_scores={},
         heatmap=worst_roi.heatmap if worst_roi else None,
         decision_path=f"ALL_PASS" if passed else "ROI_FAIL",
         orb_passed=all(r.orb_passed for r in roi_results.values() if r.orb_passed is not None),

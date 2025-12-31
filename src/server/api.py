@@ -8,6 +8,7 @@ import numpy as np
 import io
 
 from .state import ServerState
+from src.core.roi_model import normalize_roi
 
 app = FastAPI(title="Inspection Server")
 
@@ -48,18 +49,7 @@ def encode_image(img: np.ndarray) -> bytes:
 def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, stored_w: int = 1, stored_h: int = 1) -> np.ndarray:
     """
     Draws ROIs on the image.
-    Colors:
-    - Yellow: Setup / No result (Legacy default)
-
-    Semantic Colors (Outline):
-    - DIGIT: Blue
-    - ICON: Green (Wait, spec says Green for ICON, but Green is also PASS... Spec check)
-      Spec: "DIGIT -> Blue outline, ICON -> Green outline, TEXT -> Yellow outline"
-      Spec: "Green for PASS and Red for FAIL" (Visual feedback uses colored outlines)
-
-    Conflict Resolution:
-    - If Result exists: Use PASS/FAIL colors (Green/Red).
-    - If Setup/No Result: Use Type colors.
+    Uses NormalizedROI for safe access.
     """
     out = img.copy()
     h_img, w_img = out.shape[:2]
@@ -68,25 +58,22 @@ def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, 
     scale_x = w_img / stored_w if stored_w > 0 else 1
     scale_y = h_img / stored_h if stored_h > 0 else 1
 
-    for r in rois:
-        rid = r['id']
-        rtype = r.get('type', 'DIGIT')
+    for r_dict in rois:
+        # NORMALIZE
+        roi = normalize_roi(r_dict.get('id', 'unknown'), r_dict)
 
-        # BBox
-        bbox = r.get('bbox', r) # Handle flat if somehow passed (though State should have upgraded)
-
-        rx = int(bbox.get('x', 0) * scale_x)
-        ry = int(bbox.get('y', 0) * scale_y)
-        rw = int(bbox.get('w', 0) * scale_x)
-        rh = int(bbox.get('h', 0) * scale_y)
+        rx = int(roi.x * scale_x)
+        ry = int(roi.y * scale_y)
+        rw = int(roi.w * scale_x)
+        rh = int(roi.h * scale_y)
 
         # Determine color
         # Default based on Type
-        if rtype == "DIGIT":
+        if roi.type == "DIGIT":
             color = (255, 0, 0) # Blue (BGR)
-        elif rtype == "ICON":
+        elif roi.type == "ICON":
             color = (0, 255, 0) # Green (BGR)
-        elif rtype == "TEXT":
+        elif roi.type == "TEXT":
             color = (0, 255, 255) # Yellow (BGR)
         else:
             color = (255, 0, 0) # Default Blue
@@ -95,7 +82,7 @@ def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, 
 
         # Override with Result Color if available
         if results:
-            res = results.get(rid)
+            res = results.get(roi.id)
             if res:
                 if res.get("passed", False):
                     color = (0, 255, 0) # Green (PASS)
@@ -105,7 +92,7 @@ def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, 
         cv2.rectangle(out, (rx, ry), (rx+rw, ry+rh), color, thickness)
 
         # Draw Label: ID (Type)
-        label = f"{rid} ({rtype})"
+        label = f"{roi.id} ({roi.type})"
         cv2.putText(out, label, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
     return out
@@ -166,18 +153,17 @@ def list_rois():
 
     out_rois = []
     for r in raw_rois:
-        # State.get_roi_list() returns dicts with 'bbox' and 'type' now (after State upgrade)
-        # But wait, State returns what ROIManager loads. ROIManager upgrades to new format.
-        bbox = r.get("bbox", {})
+        # NORMALIZE
+        roi = normalize_roi(r.get("id"), r)
 
         out_rois.append({
-            "id": r["id"],
-            "type": r.get("type", "DIGIT"),
+            "id": roi.id,
+            "type": roi.type,
             "normalized_bbox": {
-                "x": bbox.get("x", 0) / w,
-                "y": bbox.get("y", 0) / h,
-                "w": bbox.get("w", 0) / w,
-                "h": bbox.get("h", 0) / h
+                "x": roi.x / w,
+                "y": roi.y / h,
+                "w": roi.w / w,
+                "h": roi.h / h
             }
         })
     return {"rois": out_rois}

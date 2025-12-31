@@ -13,6 +13,7 @@ from camera.mock_camera import MockCamera
 from core.dataset import DatasetManager, OverrideRecord
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
+from core.roi_model import normalize_roi
 
 class ServerState:
     _instance = None
@@ -144,20 +145,20 @@ class ServerState:
             # Clear old refs
             self.dataset_manager.clear_active_references()
 
-            for r in rois:
-                rid = r['id']
-                # Access bbox
-                bbox = r.get('bbox', r) # Support flat if state not upgraded yet (paranoid)
-                x, y, w, h = int(bbox['x']), int(bbox['y']), int(bbox['w']), int(bbox['h'])
+            for r_dict in rois:
+                # NORMALIZE
+                roi = normalize_roi(r_dict.get('id', 'unknown'), r_dict)
+
+                x, y, w, h = roi.x, roi.y, roi.w, roi.h
 
                 # Bounds check
                 if x<0 or y<0 or x+w > img.shape[1] or y+h > img.shape[0]:
                     continue
 
                 crop = img[y:y+h, x:x+w]
-                tmp_crop = f"/tmp/ref_{rid}.png"
+                tmp_crop = f"/tmp/ref_{roi.id}.png"
                 cv2.imwrite(tmp_crop, crop)
-                self.dataset_manager.save_roi_reference(rid, tmp_crop)
+                self.dataset_manager.save_roi_reference(roi.id, tmp_crop)
 
             return {
                 "status": "committed",
@@ -288,7 +289,13 @@ class ServerState:
             roi_results_dict = {}
             # Need to get ROI types to include in logs
             rois_list = roi_data.get("rois", []) if roi_data else []
-            roi_type_map = {r["id"]: r.get("type", "DIGIT") for r in rois_list}
+
+            # Helper to map types safely
+            roi_type_map = {}
+            for r_dict in rois_list:
+                # NORMALIZE just to be sure we get the type
+                roi = normalize_roi(r_dict.get('id', 'unknown'), r_dict)
+                roi_type_map[roi.id] = roi.type
 
             for rid, res in result.roi_results.items():
                 roi_results_dict[rid] = {

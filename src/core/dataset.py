@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Union, Any
 from dataclasses import dataclass
+from src.core.roi_model import normalize_roi, NormalizedROI
 
 @dataclass
 class OverrideRecord:
@@ -329,9 +330,6 @@ class DatasetManager:
                     os.makedirs(target_dir, exist_ok=True)
                     shutil.copy(src_path, os.path.join(target_dir, item))
                 else:
-                    # Should not happen in pure multi-roi, but copy anyway if exists?
-                    # If we have root images but not "legacy" mode? (Mixed state).
-                    # Treat as legacy for safety.
                     target_dir = os.path.join(new_version_path, "digits_main")
                     os.makedirs(target_dir, exist_ok=True)
                     shutil.copy(src_path, os.path.join(target_dir, item))
@@ -375,19 +373,21 @@ class DatasetManager:
                 roi_data = record.get('roi')
                 # Support new Multi-ROI structure
                 if isinstance(roi_data, dict) and "rois" in roi_data:
-                    for r in roi_data["rois"]:
-                        rid = r["id"]
-                        rx, ry, rw, rh = r["x"], r["y"], r["w"], r["h"]
+                    for r_dict in roi_data["rois"]:
+                        # NORMALIZE
+                        roi = normalize_roi(r_dict.get('id', 'unknown'), r_dict)
+
+                        rx, ry, rw, rh = roi.x, roi.y, roi.w, roi.h
 
                         # Validate bounds
                         if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
-                            print(f"Skipping ROI {rid}: Bounds invalid {rx},{ry},{rw},{rh} for img {img.shape}")
+                            print(f"Skipping ROI {roi.id}: Bounds invalid {rx},{ry},{rw},{rh} for img {img.shape}")
                             continue
 
                         # Crop
                         crop = img[ry:ry+rh, rx:rx+rw]
 
-                        target_dir = os.path.join(new_version_path, rid)
+                        target_dir = os.path.join(new_version_path, roi.id)
                         os.makedirs(target_dir, exist_ok=True)
 
                         fname = f"learned_{uuid.uuid4().hex[:8]}.png"
@@ -400,6 +400,8 @@ class DatasetManager:
                 elif isinstance(roi_data, list) and len(roi_data) == 4:
                      # Map to default "digits_main"
                      rid = "digits_main"
+
+                     # Manual normalization for list
                      rx, ry, rw, rh = roi_data[0], roi_data[1], roi_data[2], roi_data[3]
 
                      if rx < 0 or ry < 0 or rx+rw > img.shape[1] or ry+rh > img.shape[0]:
