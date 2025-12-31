@@ -10,7 +10,7 @@ import asyncio
 
 from camera.real_camera import RealCamera
 from camera.mock_camera import MockCamera
-from core.dataset import DatasetManager
+from core.dataset import DatasetManager, OverrideRecord
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
 
@@ -164,6 +164,72 @@ class ServerState:
             }
         finally:
             self.inspection_lock.release()
+
+    def override_inspection(self, inspection_id: str, action: str):
+        """
+        Records an override for a specific inspection.
+        Action: "pass" or "fail"
+        """
+        print(f"[Server] Override requested for {inspection_id} -> {action}")
+        with self.lock:
+            last_res = self.last_inspection_result
+            if not last_res or last_res.get("inspection_id") != inspection_id:
+                print(f"[Server] Override Failed: Inspection ID mismatch or missing. Last: {last_res.get('inspection_id') if last_res else 'None'}")
+                raise Exception("Inspection not found or expired")
+
+            frame_path = self.last_inspection_frame_path
+            if not frame_path or not os.path.exists(frame_path):
+                print(f"[Server] Override Failed: Frame path missing {frame_path}")
+                raise Exception("Inspection frame missing")
+
+            current_rois = self.roi_data
+
+            # Original decision
+            original_passed = last_res.get("passed", False)
+
+            # New decision
+            new_passed = (action.lower() == "pass")
+
+            print(f"[Server] Original: {original_passed}, New: {new_passed}")
+
+            # Determine score (just use original global score or 0.0)
+            # We might not have global score easily available in last_inspection_result dict
+            # We can aggregate from roi_results
+            score = 0.0 # Placeholder
+            roi_results = last_res.get("roi_results", {})
+            if roi_results:
+                scores = [r["score"] for r in roi_results.values() if "score" in r]
+                if scores:
+                    score = min(scores)
+
+            record = OverrideRecord(
+                inspection_id=inspection_id,
+                original_result=original_passed,
+                overridden_result=new_passed,
+                score=score,
+                timestamp=datetime.utcnow().isoformat() + "Z",
+                image_path=frame_path,
+                roi=current_rois # Save the ROI definition used
+            )
+
+            self.dataset_manager.save_override(record)
+            print(f"[Server] Override saved. Pending count: {self.dataset_manager.get_pending_count()}")
+
+            # Update local result to reflect override (optional, but good for UI if we polled again)
+            self.last_inspection_result["overridden"] = True
+            self.last_inspection_result["override_status"] = "PASS" if new_passed else "FAIL"
+
+    def get_pending_learning_count(self) -> int:
+        return self.dataset_manager.get_pending_count()
+
+    def commit_learning(self) -> Dict[str, Any]:
+        """
+        Commits pending overrides to a new dataset version.
+        """
+        success, msg = self.dataset_manager.commit_learning()
+        if not success:
+            raise Exception(msg)
+        return {"status": "committed", "message": msg, "new_version": self.dataset_manager.active_version}
 
     async def run_inspection_async(self) -> str:
         """

@@ -27,6 +27,10 @@ class ROIList(BaseModel):
 class ROIStatus(BaseModel):
     status: str
 
+class OverrideRequest(BaseModel):
+    inspection_id: str
+    action: str # "pass" or "fail"
+
 # Helper to encode image
 def encode_image(img: np.ndarray) -> bytes:
     success, encoded_img = cv2.imencode('.jpg', img)
@@ -230,6 +234,30 @@ def get_inspection_result():
     if not res:
         raise HTTPException(status_code=404, detail="No inspection found")
     return res
+
+@app.post("/inspection/override")
+def override_inspection(req: OverrideRequest):
+    state = ServerState.get_instance()
+    try:
+        print(f"[API] Override Request: {req.inspection_id}, {req.action}")
+        state.override_inspection(req.inspection_id, req.action)
+        return {"status": "ok", "action": req.action}
+    except Exception as e:
+        print(f"[API] Override Error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/learning/status")
+def get_learning_status():
+    state = ServerState.get_instance()
+    return {"pending_count": state.get_pending_learning_count()}
+
+@app.post("/learning/commit")
+def commit_learning():
+    state = ServerState.get_instance()
+    try:
+        return state.commit_learning()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/inspection/frame")
 def get_inspection_frame():

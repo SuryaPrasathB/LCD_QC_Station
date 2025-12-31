@@ -1,0 +1,160 @@
+
+/*
+    Dark Theme for LCD Inspection Client
+    Professional, Industrial, Clean
+*/
+
+QMainWindow, QWidget {
+    background-color: #2b2b2b;
+    color: #e0e0e0;
+    font-family: "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+    font-size: 14px;
+}
+
+/* Headers & Labels */
+QLabel {
+    color: #e0e0e0;
+}
+
+QLabel#heading {
+    font-size: 16px;
+    font-weight: bold;
+    color: #ffffff;
+    margin-bottom: 5px;
+}
+
+QLabel#status_connected {
+    color: #4caf50; /* Green */
+    font-weight: bold;
+}
+
+QLabel#status_disconnected {
+    color: #f44336; /* Red */
+    font-weight: bold;
+}
+
+/* Group Boxes (Panels) */
+QGroupBox {
+    border: 1px solid #424242;
+    border-radius: 4px;
+    margin-top: 10px;
+    padding-top: 15px;
+    background-color: #333333;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    color: #bbbbbb;
+    font-weight: bold;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: #424242;
+    border: 1px solid #555555;
+    color: #ffffff;
+    padding: 6px 12px;
+    border-radius: 3px;
+    min-width: 80px;
+}
+
+QPushButton:hover {
+    background-color: #505050;
+    border-color: #666666;
+}
+
+QPushButton:pressed {
+    background-color: #222222;
+}
+
+QPushButton:disabled {
+    background-color: #2b2b2b;
+    color: #666666;
+    border-color: #333333;
+}
+
+QPushButton#action_button {
+    background-color: #1976d2; /* Blue */
+    border-color: #1565c0;
+}
+
+QPushButton#action_button:hover {
+    background-color: #1e88e5;
+}
+
+QPushButton#danger_button {
+    background-color: #d32f2f; /* Red */
+    border-color: #c62828;
+}
+
+QPushButton#danger_button:hover {
+    background-color: #e53935;
+}
+
+/* Input Fields */
+QLineEdit {
+    background-color: #1e1e1e;
+    border: 1px solid #555555;
+    color: #ffffff;
+    padding: 4px;
+    border-radius: 2px;
+}
+
+QLineEdit:focus {
+    border: 1px solid #1976d2;
+}
+
+/* Tables */
+QTableWidget {
+    background-color: #1e1e1e;
+    gridline-color: #424242;
+    border: 1px solid #424242;
+}
+
+QTableWidget::item {
+    padding: 5px;
+}
+
+QTableWidget::item:selected {
+    background-color: #1976d2;
+}
+
+QHeaderView::section {
+    background-color: #333333;
+    color: #e0e0e0;
+    padding: 4px;
+    border: 1px solid #424242;
+}
+
+/* Result Labels */
+QLabel#result_pass {
+    color: #4caf50;
+    font-size: 24px;
+    font-weight: bold;
+    border: 2px solid #4caf50;
+    border-radius: 4px;
+    padding: 5px;
+    qproperty-alignment: AlignCenter;
+}
+
+QLabel#result_fail {
+    color: #f44336;
+    font-size: 24px;
+    font-weight: bold;
+    border: 2px solid #f44336;
+    border-radius: 4px;
+    padding: 5px;
+    qproperty-alignment: AlignCenter;
+}
+
+QLabel#result_waiting {
+    color: #ff9800; /* Orange */
+    font-size: 18px;
+    font-style: italic;
+    border: 2px dashed #ff9800;
+    border-radius: 4px;
+    padding: 5px;
+    qproperty-alignment: AlignCenter;
+}
