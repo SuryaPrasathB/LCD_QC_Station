@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
+from enum import Enum
 import cv2
 import numpy as np
 import io
@@ -11,6 +12,11 @@ from .state import ServerState
 app = FastAPI(title="Inspection Server")
 
 # Models
+class ROIType(str, Enum):
+    DIGIT = "DIGIT"
+    ICON = "ICON"
+    TEXT = "TEXT"
+
 class NormalizedBBox(BaseModel):
     x: float
     y: float
@@ -19,6 +25,7 @@ class NormalizedBBox(BaseModel):
 
 class ROIDefinition(BaseModel):
     id: str
+    type: ROIType = ROIType.DIGIT
     normalized_bbox: NormalizedBBox
 
 class ROIList(BaseModel):
@@ -42,38 +49,64 @@ def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, 
     """
     Draws ROIs on the image.
     Colors:
-    - Yellow: Setup / No result
-    - Green: PASS
-    - Red: FAIL
+    - Yellow: Setup / No result (Legacy default)
+
+    Semantic Colors (Outline):
+    - DIGIT: Blue
+    - ICON: Green (Wait, spec says Green for ICON, but Green is also PASS... Spec check)
+      Spec: "DIGIT -> Blue outline, ICON -> Green outline, TEXT -> Yellow outline"
+      Spec: "Green for PASS and Red for FAIL" (Visual feedback uses colored outlines)
+
+    Conflict Resolution:
+    - If Result exists: Use PASS/FAIL colors (Green/Red).
+    - If Setup/No Result: Use Type colors.
     """
     out = img.copy()
-    h, w = out.shape[:2]
+    h_img, w_img = out.shape[:2]
 
     # Calculate scale factor
-    scale_x = w / stored_w if stored_w > 0 else 1
-    scale_y = h / stored_h if stored_h > 0 else 1
+    scale_x = w_img / stored_w if stored_w > 0 else 1
+    scale_y = h_img / stored_h if stored_h > 0 else 1
 
     for r in rois:
         rid = r['id']
-        rx = int(r['x'] * scale_x)
-        ry = int(r['y'] * scale_y)
-        rw = int(r['w'] * scale_x)
-        rh = int(r['h'] * scale_y)
+        rtype = r.get('type', 'DIGIT')
+
+        # BBox
+        bbox = r.get('bbox', r) # Handle flat if somehow passed (though State should have upgraded)
+
+        rx = int(bbox.get('x', 0) * scale_x)
+        ry = int(bbox.get('y', 0) * scale_y)
+        rw = int(bbox.get('w', 0) * scale_x)
+        rh = int(bbox.get('h', 0) * scale_y)
 
         # Determine color
-        color = (0, 255, 255) # Yellow (BGR)
+        # Default based on Type
+        if rtype == "DIGIT":
+            color = (255, 0, 0) # Blue (BGR)
+        elif rtype == "ICON":
+            color = (0, 255, 0) # Green (BGR)
+        elif rtype == "TEXT":
+            color = (0, 255, 255) # Yellow (BGR)
+        else:
+            color = (255, 0, 0) # Default Blue
+
         thickness = 2
 
+        # Override with Result Color if available
         if results:
             res = results.get(rid)
             if res:
                 if res.get("passed", False):
-                    color = (0, 255, 0) # Green
+                    color = (0, 255, 0) # Green (PASS)
                 else:
-                    color = (0, 0, 255) # Red
+                    color = (0, 0, 255) # Red (FAIL)
 
         cv2.rectangle(out, (rx, ry), (rx+rw, ry+rh), color, thickness)
-        cv2.putText(out, rid, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Draw Label: ID (Type)
+        label = f"{rid} ({rtype})"
+        cv2.putText(out, label, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
     return out
 
@@ -133,13 +166,18 @@ def list_rois():
 
     out_rois = []
     for r in raw_rois:
+        # State.get_roi_list() returns dicts with 'bbox' and 'type' now (after State upgrade)
+        # But wait, State returns what ROIManager loads. ROIManager upgrades to new format.
+        bbox = r.get("bbox", {})
+
         out_rois.append({
             "id": r["id"],
+            "type": r.get("type", "DIGIT"),
             "normalized_bbox": {
-                "x": r["x"] / w,
-                "y": r["y"] / h,
-                "w": r["w"] / w,
-                "h": r["h"] / h
+                "x": bbox.get("x", 0) / w,
+                "y": bbox.get("y", 0) / h,
+                "w": bbox.get("w", 0) / w,
+                "h": bbox.get("h", 0) / h
             }
         })
     return {"rois": out_rois}
@@ -149,28 +187,20 @@ def set_roi(roi: ROIDefinition):
     state = ServerState.get_instance()
 
     # Use config from camera if available (for CAPTURE resolution)
-    # If Mock or generic, try to get from current ROI data or default.
     w, h = 0, 0
     if hasattr(state.camera, "main_config"):
-         # RealCamera has main_config
          cfg = state.camera.main_config
          if cfg and "size" in cfg:
              w, h = cfg["size"]
 
-    # Fallback to defaults if not found (e.g. MockCamera might not expose it identically)
     if w == 0 or h == 0:
-        # Check if Mock
         if state.camera.__class__.__name__ == "MockCamera":
-             # Mock usually 1920x1080? Or whatever it mocks.
-             # Let's check if we can get it from 'roi_data' if it exists.
              if state.roi_data and "image_width" in state.roi_data:
                   w = state.roi_data["image_width"]
                   h = state.roi_data["image_height"]
              else:
-                  # Default High Res
                   w, h = 3280, 2464
         else:
-             # Default High Res
              w, h = 3280, 2464
 
     # Spec: "Overwrites ROI if ID exists"
@@ -185,7 +215,10 @@ def set_roi(roi: ROIDefinition):
 
     new_entry = {
         "id": roi.id,
-        "x": abs_x, "y": abs_y, "w": abs_w, "h": abs_h
+        "type": roi.type.value,
+        "bbox": {
+            "x": abs_x, "y": abs_y, "w": abs_w, "h": abs_h
+        }
     }
 
     for r in current_rois:
@@ -219,12 +252,10 @@ def commit_rois():
 @app.post("/inspection/start")
 async def start_inspection():
     state = ServerState.get_instance()
-    # Attempt to start inspection (non-blocking call, returns ID or raises if busy)
     try:
         insp_id = await state.run_inspection_async()
         return {"inspection_id": insp_id, "status": "started"}
     except Exception as e:
-         # If busy
          raise HTTPException(status_code=409, detail=str(e))
 
 @app.get("/inspection/result")

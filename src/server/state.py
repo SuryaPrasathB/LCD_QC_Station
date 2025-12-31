@@ -146,7 +146,9 @@ class ServerState:
 
             for r in rois:
                 rid = r['id']
-                x, y, w, h = int(r['x']), int(r['y']), int(r['w']), int(r['h'])
+                # Access bbox
+                bbox = r.get('bbox', r) # Support flat if state not upgraded yet (paranoid)
+                x, y, w, h = int(bbox['x']), int(bbox['y']), int(bbox['w']), int(bbox['h'])
 
                 # Bounds check
                 if x<0 or y<0 or x+w > img.shape[1] or y+h > img.shape[0]:
@@ -193,9 +195,7 @@ class ServerState:
             print(f"[Server] Original: {original_passed}, New: {new_passed}")
 
             # Determine score (just use original global score or 0.0)
-            # We might not have global score easily available in last_inspection_result dict
-            # We can aggregate from roi_results
-            score = 0.0 # Placeholder
+            score = 0.0
             roi_results = last_res.get("roi_results", {})
             if roi_results:
                 scores = [r["score"] for r in roi_results.values() if "score" in r]
@@ -236,23 +236,12 @@ class ServerState:
         Async wrapper to run inspection in background.
         Returns inspection_id immediately.
         """
-        # Check if already running?
         if self.inspection_lock.locked():
              raise Exception("Inspection already in progress")
 
         insp_id = f"insp_{datetime.utcnow().strftime('%Y_%m_%d_%H%M%S')}"
 
-        # We must offload the blocking part to a thread
         loop = asyncio.get_running_loop()
-        # Note: We acquire lock inside the thread or check before?
-        # If we check before (here), there's a tiny race condition if multiple requests come in exactly same time.
-        # But single threaded asyncio, `await` yields.
-        # Safer to acquire lock here? But lock is thread-blocking.
-        # We can't acquire threading.Lock non-blockingly in asyncio easily without blocking loop if we wait.
-        # But we want to FAIL if busy.
-        # `inspection_lock.locked()` is not thread-safe in python? It is.
-        # So we check.
-
         loop.run_in_executor(None, self._run_inspection_sync, insp_id)
 
         return insp_id
@@ -285,7 +274,6 @@ class ServerState:
                          refs_nested[rid][k] = r_img
 
             roi_data = self.roi_data
-
             version = self.dataset_manager.active_version
 
             result = perform_inspection(
@@ -298,8 +286,13 @@ class ServerState:
 
             # Save Record
             roi_results_dict = {}
+            # Need to get ROI types to include in logs
+            rois_list = roi_data.get("rois", []) if roi_data else []
+            roi_type_map = {r["id"]: r.get("type", "DIGIT") for r in rois_list}
+
             for rid, res in result.roi_results.items():
                 roi_results_dict[rid] = {
+                    "type": roi_type_map.get(rid, "DIGIT"), # Add Type to log
                     "passed": res.passed,
                     "score": res.best_score
                 }

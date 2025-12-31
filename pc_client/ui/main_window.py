@@ -271,17 +271,28 @@ class MainWindow(QMainWindow):
     def on_roi_drawn(self, x, y, w, h):
         print(f"[Client] ROI drawn: {x:.3f},{y:.3f},{w:.3f},{h:.3f}")
         worker = self.start_worker(self.client.get_roi_list)
-        worker.result_ready.connect(lambda rois: self.prompt_roi_name(rois, x, y, w, h))
+        worker.result_ready.connect(lambda rois: self.prompt_roi_details(rois, x, y, w, h))
 
-    def prompt_roi_name(self, current_rois, x, y, w, h):
+    def prompt_roi_details(self, current_rois, x, y, w, h):
+        # 1. Ask for ID
         default_id = f"roi_{len(current_rois) + 1}"
-        name, ok = QInputDialog.getText(self, "ROI ID", "Enter ROI ID:", text=default_id)
-        if ok and name:
-            self.add_roi(name, x, y, w, h)
+        name, ok_name = QInputDialog.getText(self, "ROI ID", "Enter ROI ID:", text=default_id)
 
-    def add_roi(self, roi_id, x, y, w, h):
-        worker = self.start_worker(self.client.set_roi, roi_id, x, y, w, h)
-        worker.result_ready.connect(lambda res: print(f"[Client] ROI {roi_id} added"))
+        if not ok_name or not name:
+            return
+
+        # 2. Ask for Type
+        types = ["DIGIT", "ICON", "TEXT"]
+        rtype, ok_type = QInputDialog.getItem(self, "ROI Type", "Select ROI Type:", types, 0, False)
+
+        if not ok_type:
+            return
+
+        self.add_roi(name, x, y, w, h, rtype)
+
+    def add_roi(self, roi_id, x, y, w, h, rtype):
+        worker = self.start_worker(self.client.set_roi, roi_id, x, y, w, h, rtype)
+        worker.result_ready.connect(lambda res: print(f"[Client] ROI {roi_id} ({rtype}) added"))
 
     def clear_rois(self):
         print("[Client] Clearing ROIs requested")

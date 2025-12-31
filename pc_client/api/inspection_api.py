@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 import requests
 import json
 
@@ -46,11 +46,12 @@ class InspectionClient:
         print(f"[Client] Received {len(rois)} ROIs")
         return rois
 
-    def set_roi(self, roi_id: str, x: float, y: float, w: float, h: float) -> Dict:
+    def set_roi(self, roi_id: str, x: float, y: float, w: float, h: float, roi_type: str = "DIGIT") -> Dict:
         """POST /roi/set"""
-        print(f"[Client] Setting ROI {roi_id}: {x},{y},{w},{h}")
+        print(f"[Client] Setting ROI {roi_id} ({roi_type}): {x},{y},{w},{h}")
         payload = {
             "id": roi_id,
+            "type": roi_type,
             "normalized_bbox": {
                 "x": x,
                 "y": y,
