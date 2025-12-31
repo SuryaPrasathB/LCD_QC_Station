@@ -1,3 +1,6 @@
 numpy==1.26.4
 scikit-image
 onnxruntime
+fastapi
+uvicorn
+python-multipart
