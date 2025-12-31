@@ -11,6 +11,7 @@ import asyncio
 from camera.real_camera import RealCamera
 from camera.mock_camera import MockCamera
 from core.dataset import DatasetManager, OverrideRecord
+from core.migration import migrate_legacy_structure
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
 from core.roi_model import normalize_roi
@@ -31,8 +32,20 @@ class ServerState:
         self.lock = threading.Lock()
         self.inspection_lock = threading.Lock()
 
+        # 0. Legacy Migration (Once on startup)
+        try:
+             migrate_legacy_structure(".")
+        except Exception as e:
+             print(f"[Server] Migration warning: {e}")
+
         # 1. Initialize Components
-        self.dataset_manager = DatasetManager(".")
+        self.datasets_root = os.path.join(".", DatasetManager.DATA_ROOT)
+        self.active_dataset_name = "default"
+
+        # Check if default exists, if not, maybe find first available?
+        # For now, default is fine as migration ensures it exists if legacy did.
+
+        self.dataset_manager = DatasetManager(".", self.active_dataset_name)
         self.dataset_manager.initialize()
         self.roi_manager = ROIManager(self.dataset_manager)
 
@@ -99,6 +112,80 @@ class ServerState:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
             return None
+
+    # --- Dataset Management ---
+
+    def list_datasets(self) -> List[str]:
+        if not os.path.exists(self.datasets_root):
+            return []
+
+        datasets = []
+        for name in os.listdir(self.datasets_root):
+             if os.path.isdir(os.path.join(self.datasets_root, name)):
+                 datasets.append(name)
+        return sorted(datasets)
+
+    def create_dataset(self, name: str) -> bool:
+        if not name or ".." in name or "/" in name:
+            return False
+
+        target_path = os.path.join(self.datasets_root, name)
+        if os.path.exists(target_path):
+            return False # Already exists
+
+        os.makedirs(target_path, exist_ok=True)
+
+        # Initialize it properly
+        dm = DatasetManager(".", name)
+        dm.initialize()
+        return True
+
+    def set_active_dataset(self, name: str) -> bool:
+        target_path = os.path.join(self.datasets_root, name)
+        if not os.path.exists(target_path):
+             return False
+
+        with self.lock:
+             self.active_dataset_name = name
+             self.dataset_manager = DatasetManager(".", name)
+             # Don't re-initialize fully (don't overwrite version file if exists), but ensure paths
+             self.dataset_manager.initialize()
+
+             # Re-bind ROI Manager
+             self.roi_manager = ROIManager(self.dataset_manager)
+
+             # Reload ROIs for new dataset
+             self.roi_data = self.roi_manager.load_roi()
+
+             print(f"[Server] Switched to dataset: {name}")
+             return True
+
+    def get_active_dataset_name(self) -> str:
+        return self.active_dataset_name
+
+    # --------------------------
+
+    def set_roi_override(self, roi_id: str, force_pass: bool):
+        """
+        Updates the override status for a specific ROI.
+        """
+        with self.lock:
+            rois = self.get_roi_list()
+            updated = False
+            for r in rois:
+                if r["id"] == roi_id:
+                    r["force_pass"] = force_pass
+                    updated = True
+                    break
+
+            if updated:
+                # Save changes
+                img_w = self.roi_data.get("image_width", 0)
+                img_h = self.roi_data.get("image_height", 0)
+                self.update_rois(rois, img_w, img_h)
+                print(f"[Server] ROI {roi_id} force_pass set to {force_pass}")
+                return True
+            return False
 
     def get_roi_list(self):
         # Refresh from disk/memory if needed, or return cached
@@ -301,7 +388,9 @@ class ServerState:
                 roi_results_dict[rid] = {
                     "type": roi_type_map.get(rid, "DIGIT"), # Add Type to log
                     "passed": res.passed,
-                    "score": res.best_score
+                    "score": res.best_score,
+                    "failure_reason": res.failure_reason,
+                    "failure_detail": res.failure_detail
                 }
 
             log_data = {

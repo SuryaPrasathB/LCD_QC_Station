@@ -1,8 +1,9 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog
+    QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog,
+    QComboBox, QCheckBox, QScrollArea, QFrame, QDialog, QFormLayout
 )
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent, Qt
 from pc_client.api.inspection_api import InspectionClient
 from pc_client.ui.live_view import LiveView
 from pc_client.ui.results_panel import ResultsPanel
@@ -29,6 +30,45 @@ class ApiWorker(QThread):
             self.error_occurred.emit(str(e))
         finally:
             self.finished_task.emit(self)
+
+class ROISettingsDialog(QDialog):
+    def __init__(self, rois, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ROI Configuration")
+        self.resize(400, 300)
+        self.rois = rois
+        self.updated_configs = {} # roi_id -> force_pass
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        form = QFormLayout(content)
+
+        self.checks = {}
+        for r in self.rois:
+            rid = r['id']
+            force = r.get('force_pass', False)
+
+            cb = QCheckBox("Force PASS (Bypass Semantic Check)")
+            cb.setChecked(force)
+            cb.toggled.connect(lambda checked, i=rid: self.on_change(i, checked))
+
+            form.addRow(f"{rid} ({r.get('type','?')})", cb)
+            self.checks[rid] = cb
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
+
+    def on_change(self, rid, checked):
+        self.updated_configs[rid] = checked
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -96,6 +136,24 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(conn_group)
 
+        # Dataset Selector
+        self.dataset_group = QGroupBox("Dataset Management")
+        ds_layout = QHBoxLayout()
+
+        self.combo_datasets = QComboBox()
+        self.combo_datasets.currentIndexChanged.connect(self.on_dataset_changed)
+
+        self.btn_new_dataset = QPushButton("New...")
+        self.btn_new_dataset.clicked.connect(self.create_dataset_prompt)
+
+        ds_layout.addWidget(QLabel("Active Dataset:"))
+        ds_layout.addWidget(self.combo_datasets, 1)
+        ds_layout.addWidget(self.btn_new_dataset)
+
+        self.dataset_group.setLayout(ds_layout)
+        self.dataset_group.setVisible(False) # Hidden until connected
+        left_layout.addWidget(self.dataset_group)
+
         # Live View
         self.live_view = LiveView()
         self.live_view.roi_drawn.connect(self.on_roi_drawn)
@@ -114,6 +172,9 @@ class MainWindow(QMainWindow):
         self.btn_setup.setCheckable(True)
         self.btn_setup.toggled.connect(self.toggle_setup_mode)
 
+        self.btn_roi_config = QPushButton("ROI Config / Overrides")
+        self.btn_roi_config.clicked.connect(self.open_roi_config)
+
         self.btn_clear = QPushButton("Clear ROIs")
         self.btn_clear.setObjectName("danger_button")
         self.btn_clear.clicked.connect(self.clear_rois)
@@ -127,6 +188,7 @@ class MainWindow(QMainWindow):
         self.btn_inspect.clicked.connect(self.start_inspection)
 
         ctrl_layout.addWidget(self.btn_setup)
+        ctrl_layout.addWidget(self.btn_roi_config)
         ctrl_layout.addWidget(self.btn_clear)
         ctrl_layout.addWidget(self.btn_commit)
         ctrl_layout.addSpacing(10)
@@ -196,6 +258,7 @@ class MainWindow(QMainWindow):
 
     def apply_state(self, connected: bool):
         self.ctrl_group.setEnabled(connected)
+        self.dataset_group.setVisible(connected)
         self.txt_ip.setEnabled(not connected)
         self.txt_port.setEnabled(not connected)
         self.results_panel.set_buttons_enabled(connected and self.current_inspection_id is not None)
@@ -205,6 +268,7 @@ class MainWindow(QMainWindow):
             self.lbl_conn_status.setText("● Connected")
             self.lbl_conn_status.setObjectName("status_connected")
             self.live_timer.start()
+            self.refresh_datasets()
         else:
             self.btn_connect.setText("Connect")
             self.lbl_conn_status.setText("● Disconnected")
@@ -377,3 +441,58 @@ class MainWindow(QMainWindow):
         worker = self.start_worker(self.client.commit_learning)
         worker.result_ready.connect(lambda res: QMessageBox.information(self, "Learning", f"Committed: {res.get('message')}"))
         worker.result_ready.connect(lambda: self.refresh_learning_status())
+
+    # --- Dataset & Config ---
+
+    def refresh_datasets(self):
+        worker = self.start_worker(self.client.list_datasets)
+        worker.result_ready.connect(self.update_dataset_combo)
+
+    def update_dataset_combo(self, data):
+        datasets = data.get("datasets", [])
+        active = data.get("active", "")
+
+        self.combo_datasets.blockSignals(True)
+        self.combo_datasets.clear()
+
+        idx = 0
+        for i, name in enumerate(datasets):
+            self.combo_datasets.addItem(name)
+            if name == active:
+                idx = i
+
+        self.combo_datasets.setCurrentIndex(idx)
+        self.combo_datasets.blockSignals(False)
+
+    def on_dataset_changed(self, index):
+        name = self.combo_datasets.currentText()
+        print(f"[Client] Switching dataset to {name}")
+        worker = self.start_worker(self.client.select_dataset, name)
+        worker.result_ready.connect(lambda res: print(f"Switched to {res['name']}"))
+        worker.result_ready.connect(self.clear_ui_on_dataset_switch)
+
+    def clear_ui_on_dataset_switch(self):
+        self.results_panel.clear()
+        self.live_view.set_frame(None) # Wait for next frame
+
+    def create_dataset_prompt(self):
+        name, ok = QInputDialog.getText(self, "New Dataset", "Dataset Name (Product):")
+        if ok and name:
+            worker = self.start_worker(self.client.create_dataset, name)
+            worker.result_ready.connect(self.refresh_datasets)
+            worker.error_occurred.connect(lambda e: QMessageBox.warning(self, "Error", f"Failed: {e}"))
+
+    def open_roi_config(self):
+        worker = self.start_worker(self.client.get_roi_list)
+        worker.result_ready.connect(self.show_roi_config_dialog)
+
+    def show_roi_config_dialog(self, rois):
+        if not rois:
+            QMessageBox.information(self, "Info", "No ROIs defined.")
+            return
+
+        dlg = ROISettingsDialog(rois, self)
+        if dlg.exec():
+            # Apply changes
+            for rid, val in dlg.updated_configs.items():
+                self.start_worker(self.client.set_roi_config, rid, val)

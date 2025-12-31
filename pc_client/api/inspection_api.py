@@ -63,6 +63,14 @@ class InspectionClient:
         resp.raise_for_status()
         return resp.json()
 
+    def set_roi_config(self, roi_id: str, force_pass: bool) -> Dict:
+        """POST /roi/{roi_id}/config"""
+        print(f"[Client] Setting ROI {roi_id} force_pass={force_pass}")
+        payload = {"force_pass": force_pass}
+        resp = requests.post(f"{self.base_url}/roi/{roi_id}/config", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
     def clear_rois(self) -> Dict:
         """POST /roi/clear"""
         print("[Client] Clearing ROIs...")
@@ -127,4 +135,24 @@ class InspectionClient:
         resp = requests.post(f"{self.base_url}/learning/commit", timeout=self.timeout)
         resp.raise_for_status()
         print(f"[Client] Learning commit success: {resp.json()}")
+        return resp.json()
+
+    def list_datasets(self) -> Dict:
+        """GET /datasets"""
+        resp = requests.get(f"{self.base_url}/datasets", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_dataset(self, name: str) -> Dict:
+        """POST /datasets"""
+        payload = {"name": name}
+        resp = requests.post(f"{self.base_url}/datasets", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def select_dataset(self, name: str) -> Dict:
+        """POST /datasets/select"""
+        payload = {"name": name}
+        resp = requests.post(f"{self.base_url}/datasets/select", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
         return resp.json()

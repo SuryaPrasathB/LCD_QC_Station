@@ -401,6 +401,20 @@ def inspect_roi(
     """
     Type-aware inspection router with semantic validation layer.
     """
+    # 0. Override Check
+    if roi.force_pass:
+        return ROIResult(
+            roi_id=roi.id,
+            passed=True,
+            best_score=1.0,
+            best_reference_id="forced_pass",
+            decision_path="FORCED_PASS",
+            type=roi.type,
+            similarity_passed=True,
+            semantic_passed=True,
+            failure_reason=None
+        )
+
     # 1. Similarity Inspection
     res = _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
 

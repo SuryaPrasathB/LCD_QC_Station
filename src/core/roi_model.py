@@ -9,6 +9,7 @@ class NormalizedROI:
     y: int
     w: int
     h: int
+    force_pass: bool = False
 
 def normalize_roi(roi_id: str, roi_dict: Dict[str, Any]) -> NormalizedROI:
     """
@@ -17,6 +18,9 @@ def normalize_roi(roi_id: str, roi_dict: Dict[str, Any]) -> NormalizedROI:
     """
     # 1. Determine Type
     rtype = roi_dict.get("type", "DIGIT")
+
+    # Determine Override
+    force_pass = roi_dict.get("force_pass", False)
 
     # 2. Extract Coordinates (Handle Legacy vs New Schema)
     if "bbox" in roi_dict:
@@ -45,5 +49,6 @@ def normalize_roi(roi_id: str, roi_dict: Dict[str, Any]) -> NormalizedROI:
         x=int(x),
         y=int(y),
         w=int(w),
-        h=int(h)
+        h=int(h),
+        force_pass=bool(force_pass)
     )

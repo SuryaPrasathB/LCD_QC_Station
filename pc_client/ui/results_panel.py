@@ -9,6 +9,9 @@ class ResultsPanel(QWidget):
     override_pass = pyqtSignal()
     override_fail = pyqtSignal()
 
+    # New Signal for force pass toggle (roi_id, new_state)
+    force_pass_toggled = pyqtSignal(str, bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.lbl_status = None
@@ -43,9 +46,14 @@ class ResultsPanel(QWidget):
         table_layout = QVBoxLayout()
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["ROI ID", "Status", "Score"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Columns: ID, Status, Score, Reason
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ROI ID", "Status", "Score", "Reason"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
@@ -124,17 +132,34 @@ class ResultsPanel(QWidget):
         for row, (roi_id, res) in enumerate(roi_results.items()):
             roi_pass = res.get("passed", False)
             score = res.get("score", 0.0)
+            reason = res.get("failure_reason")
+            detail = res.get("failure_detail")
+
+            reason_text = ""
+            if not roi_pass:
+                if reason:
+                    reason_text = reason
+                    if detail:
+                        reason_text += f" ({detail})"
+                else:
+                    reason_text = "Similarity Fail"
 
             item_id = QTableWidgetItem(roi_id)
 
             item_status = QTableWidgetItem("PASS" if roi_pass else "FAIL")
             item_status.setForeground(Qt.GlobalColor.green if roi_pass else Qt.GlobalColor.red)
+            item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             item_score = QTableWidgetItem(f"{score:.4f}")
+            item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            item_reason = QTableWidgetItem(reason_text)
+            item_reason.setToolTip(reason_text)
 
             self.table.setItem(row, 0, item_id)
             self.table.setItem(row, 1, item_status)
             self.table.setItem(row, 2, item_score)
+            self.table.setItem(row, 3, item_reason)
 
     def set_buttons_enabled(self, enabled: bool):
         self.btn_pass.setEnabled(enabled)
