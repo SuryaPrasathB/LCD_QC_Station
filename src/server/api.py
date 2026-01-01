@@ -1,16 +1,23 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
+from enum import Enum
 import cv2
 import numpy as np
 import io
 
 from .state import ServerState
+from src.core.roi_model import normalize_roi
 
 app = FastAPI(title="Inspection Server")
 
 # Models
+class ROIType(str, Enum):
+    DIGIT = "DIGIT"
+    ICON = "ICON"
+    TEXT = "TEXT"
+
 class NormalizedBBox(BaseModel):
     x: float
     y: float
@@ -19,6 +26,7 @@ class NormalizedBBox(BaseModel):
 
 class ROIDefinition(BaseModel):
     id: str
+    type: ROIType = ROIType.DIGIT
     normalized_bbox: NormalizedBBox
 
 class ROIList(BaseModel):
@@ -30,6 +38,16 @@ class ROIStatus(BaseModel):
 class OverrideRequest(BaseModel):
     inspection_id: str
     action: str # "pass" or "fail"
+    roi_id: Optional[str] = None # Optional for legacy compatibility, but preferred
+
+class DatasetCreateRequest(BaseModel):
+    name: str
+
+class DatasetSelectRequest(BaseModel):
+    name: str
+
+class ROIOverrideConfig(BaseModel):
+    force_pass: bool
 
 # Helper to encode image
 def encode_image(img: np.ndarray) -> bytes:
@@ -41,39 +59,54 @@ def encode_image(img: np.ndarray) -> bytes:
 def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, stored_w: int = 1, stored_h: int = 1) -> np.ndarray:
     """
     Draws ROIs on the image.
-    Colors:
-    - Yellow: Setup / No result
-    - Green: PASS
-    - Red: FAIL
+    Uses NormalizedROI for safe access.
     """
     out = img.copy()
-    h, w = out.shape[:2]
+    h_img, w_img = out.shape[:2]
 
     # Calculate scale factor
-    scale_x = w / stored_w if stored_w > 0 else 1
-    scale_y = h / stored_h if stored_h > 0 else 1
+    scale_x = w_img / stored_w if stored_w > 0 else 1
+    scale_y = h_img / stored_h if stored_h > 0 else 1
 
-    for r in rois:
-        rid = r['id']
-        rx = int(r['x'] * scale_x)
-        ry = int(r['y'] * scale_y)
-        rw = int(r['w'] * scale_x)
-        rh = int(r['h'] * scale_y)
+    for r_dict in rois:
+        # NORMALIZE
+        roi = normalize_roi(r_dict.get('id', 'unknown'), r_dict)
+
+        rx = int(roi.x * scale_x)
+        ry = int(roi.y * scale_y)
+        rw = int(roi.w * scale_x)
+        rh = int(roi.h * scale_y)
 
         # Determine color
-        color = (0, 255, 255) # Yellow (BGR)
+        # Default based on Type
+        if roi.type == "DIGIT":
+            color = (255, 0, 0) # Blue (BGR)
+        elif roi.type == "ICON":
+            color = (0, 255, 0) # Green (BGR)
+        elif roi.type == "TEXT":
+            color = (0, 255, 255) # Yellow (BGR)
+        else:
+            color = (255, 0, 0) # Default Blue
+
         thickness = 2
 
+        # Override with Result Color if available
         if results:
-            res = results.get(rid)
+            res = results.get(roi.id)
             if res:
                 if res.get("passed", False):
-                    color = (0, 255, 0) # Green
+                    color = (0, 255, 0) # Green (PASS)
                 else:
-                    color = (0, 0, 255) # Red
+                    color = (0, 0, 255) # Red (FAIL)
 
         cv2.rectangle(out, (rx, ry), (rx+rw, ry+rh), color, thickness)
-        cv2.putText(out, rid, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Draw Label: ID (Type)
+        label = f"{roi.id} ({roi.type})"
+        if roi.force_pass:
+            label += " [FORCE]"
+
+        cv2.putText(out, label, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
     return out
 
@@ -85,6 +118,7 @@ def health_check():
         "device": "raspberry_pi",
         "camera": "ready" if state.camera.is_running() else "stopped",
         "inspection_method": "hybrid",
+        "dataset_name": state.get_active_dataset_name(),
         "active_dataset_version": state.dataset_manager.active_version,
         "model_version": "embedding_v2"
     }
@@ -119,7 +153,7 @@ def get_live_frame_rois():
 
     return Response(content=encode_image(annotated), media_type="image/jpeg")
 
-@app.get("/roi/list", response_model=ROIList)
+@app.get("/roi/list") # Removed response_model to handle new fields easily
 def list_rois():
     state = ServerState.get_instance()
     raw_rois = state.get_roi_list()
@@ -133,13 +167,18 @@ def list_rois():
 
     out_rois = []
     for r in raw_rois:
+        # NORMALIZE
+        roi = normalize_roi(r.get("id"), r)
+
         out_rois.append({
-            "id": r["id"],
+            "id": roi.id,
+            "type": roi.type,
+            "force_pass": roi.force_pass,
             "normalized_bbox": {
-                "x": r["x"] / w,
-                "y": r["y"] / h,
-                "w": r["w"] / w,
-                "h": r["h"] / h
+                "x": roi.x / w,
+                "y": roi.y / h,
+                "w": roi.w / w,
+                "h": roi.h / h
             }
         })
     return {"rois": out_rois}
@@ -149,28 +188,20 @@ def set_roi(roi: ROIDefinition):
     state = ServerState.get_instance()
 
     # Use config from camera if available (for CAPTURE resolution)
-    # If Mock or generic, try to get from current ROI data or default.
     w, h = 0, 0
     if hasattr(state.camera, "main_config"):
-         # RealCamera has main_config
          cfg = state.camera.main_config
          if cfg and "size" in cfg:
              w, h = cfg["size"]
 
-    # Fallback to defaults if not found (e.g. MockCamera might not expose it identically)
     if w == 0 or h == 0:
-        # Check if Mock
         if state.camera.__class__.__name__ == "MockCamera":
-             # Mock usually 1920x1080? Or whatever it mocks.
-             # Let's check if we can get it from 'roi_data' if it exists.
              if state.roi_data and "image_width" in state.roi_data:
                   w = state.roi_data["image_width"]
                   h = state.roi_data["image_height"]
              else:
-                  # Default High Res
                   w, h = 3280, 2464
         else:
-             # Default High Res
              w, h = 3280, 2464
 
     # Spec: "Overwrites ROI if ID exists"
@@ -183,9 +214,20 @@ def set_roi(roi: ROIDefinition):
     abs_w = int(roi.normalized_bbox.w * w)
     abs_h = int(roi.normalized_bbox.h * h)
 
+    # Check if existing to preserve flags like force_pass
+    existing_force_pass = False
+    for r in current_rois:
+        if r["id"] == roi.id:
+            existing_force_pass = r.get("force_pass", False)
+            break
+
     new_entry = {
         "id": roi.id,
-        "x": abs_x, "y": abs_y, "w": abs_w, "h": abs_h
+        "type": roi.type.value,
+        "force_pass": existing_force_pass,
+        "bbox": {
+            "x": abs_x, "y": abs_y, "w": abs_w, "h": abs_h
+        }
     }
 
     for r in current_rois:
@@ -200,6 +242,14 @@ def set_roi(roi: ROIDefinition):
 
     state.update_rois(new_rois, w, h)
     return {"status": "updated", "count": len(new_rois)}
+
+@app.post("/roi/{roi_id}/config")
+def set_roi_config(roi_id: str, config: ROIOverrideConfig):
+    state = ServerState.get_instance()
+    success = state.set_roi_override(roi_id, config.force_pass)
+    if not success:
+         raise HTTPException(status_code=404, detail="ROI not found")
+    return {"status": "updated", "roi_id": roi_id, "force_pass": config.force_pass}
 
 @app.post("/roi/clear")
 def clear_rois():
@@ -219,12 +269,10 @@ def commit_rois():
 @app.post("/inspection/start")
 async def start_inspection():
     state = ServerState.get_instance()
-    # Attempt to start inspection (non-blocking call, returns ID or raises if busy)
     try:
         insp_id = await state.run_inspection_async()
         return {"inspection_id": insp_id, "status": "started"}
     except Exception as e:
-         # If busy
          raise HTTPException(status_code=409, detail=str(e))
 
 @app.get("/inspection/result")
@@ -239,9 +287,9 @@ def get_inspection_result():
 def override_inspection(req: OverrideRequest):
     state = ServerState.get_instance()
     try:
-        print(f"[API] Override Request: {req.inspection_id}, {req.action}")
-        state.override_inspection(req.inspection_id, req.action)
-        return {"status": "ok", "action": req.action}
+        print(f"[API] Override Request: {req.inspection_id}, {req.action}, ROI: {req.roi_id}")
+        state.override_inspection(req.inspection_id, req.action, req.roi_id)
+        return {"status": "ok", "action": req.action, "roi_id": req.roi_id}
     except Exception as e:
         print(f"[API] Override Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -283,3 +331,26 @@ def get_inspection_frame():
     annotated = draw_rois_on_frame(img, rois, results, stored_w, stored_h)
 
     return Response(content=encode_image(annotated), media_type="image/jpeg")
+
+# --- Datasets API ---
+
+@app.get("/datasets")
+def list_datasets():
+    state = ServerState.get_instance()
+    return {"datasets": state.list_datasets(), "active": state.get_active_dataset_name()}
+
+@app.post("/datasets")
+def create_dataset(req: DatasetCreateRequest):
+    state = ServerState.get_instance()
+    success = state.create_dataset(req.name)
+    if not success:
+        raise HTTPException(status_code=400, detail="Dataset already exists or invalid name")
+    return {"status": "created", "name": req.name}
+
+@app.post("/datasets/select")
+def select_dataset(req: DatasetSelectRequest):
+    state = ServerState.get_instance()
+    success = state.set_active_dataset(req.name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {"status": "selected", "name": req.name}
