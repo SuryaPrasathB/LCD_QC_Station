@@ -11,6 +11,7 @@ import asyncio
 from camera.real_camera import RealCamera
 from camera.mock_camera import MockCamera
 from core.dataset import DatasetManager, OverrideRecord
+from core.migration import migrate_legacy_structure
 from roi import ROIManager
 from core.inspection import perform_inspection, InspectionResult
 from core.roi_model import normalize_roi
@@ -31,8 +32,20 @@ class ServerState:
         self.lock = threading.Lock()
         self.inspection_lock = threading.Lock()
 
+        # 0. Legacy Migration (Once on startup)
+        try:
+             migrate_legacy_structure(".")
+        except Exception as e:
+             print(f"[Server] Migration warning: {e}")
+
         # 1. Initialize Components
-        self.dataset_manager = DatasetManager(".")
+        self.datasets_root = os.path.join(".", DatasetManager.DATA_ROOT)
+        self.active_dataset_name = "default"
+
+        # Check if default exists, if not, maybe find first available?
+        # For now, default is fine as migration ensures it exists if legacy did.
+
+        self.dataset_manager = DatasetManager(".", self.active_dataset_name)
         self.dataset_manager.initialize()
         self.roi_manager = ROIManager(self.dataset_manager)
 
@@ -99,6 +112,80 @@ class ServerState:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
             return None
+
+    # --- Dataset Management ---
+
+    def list_datasets(self) -> List[str]:
+        if not os.path.exists(self.datasets_root):
+            return []
+
+        datasets = []
+        for name in os.listdir(self.datasets_root):
+             if os.path.isdir(os.path.join(self.datasets_root, name)):
+                 datasets.append(name)
+        return sorted(datasets)
+
+    def create_dataset(self, name: str) -> bool:
+        if not name or ".." in name or "/" in name:
+            return False
+
+        target_path = os.path.join(self.datasets_root, name)
+        if os.path.exists(target_path):
+            return False # Already exists
+
+        os.makedirs(target_path, exist_ok=True)
+
+        # Initialize it properly
+        dm = DatasetManager(".", name)
+        dm.initialize()
+        return True
+
+    def set_active_dataset(self, name: str) -> bool:
+        target_path = os.path.join(self.datasets_root, name)
+        if not os.path.exists(target_path):
+             return False
+
+        with self.lock:
+             self.active_dataset_name = name
+             self.dataset_manager = DatasetManager(".", name)
+             # Don't re-initialize fully (don't overwrite version file if exists), but ensure paths
+             self.dataset_manager.initialize()
+
+             # Re-bind ROI Manager
+             self.roi_manager = ROIManager(self.dataset_manager)
+
+             # Reload ROIs for new dataset
+             self.roi_data = self.roi_manager.load_roi()
+
+             print(f"[Server] Switched to dataset: {name}")
+             return True
+
+    def get_active_dataset_name(self) -> str:
+        return self.active_dataset_name
+
+    # --------------------------
+
+    def set_roi_override(self, roi_id: str, force_pass: bool):
+        """
+        Updates the override status for a specific ROI.
+        """
+        with self.lock:
+            rois = self.get_roi_list()
+            updated = False
+            for r in rois:
+                if r["id"] == roi_id:
+                    r["force_pass"] = force_pass
+                    updated = True
+                    break
+
+            if updated:
+                # Save changes
+                img_w = self.roi_data.get("image_width", 0)
+                img_h = self.roi_data.get("image_height", 0)
+                self.update_rois(rois, img_w, img_h)
+                print(f"[Server] ROI {roi_id} force_pass set to {force_pass}")
+                return True
+            return False
 
     def get_roi_list(self):
         # Refresh from disk/memory if needed, or return cached
@@ -168,57 +255,92 @@ class ServerState:
         finally:
             self.inspection_lock.release()
 
-    def override_inspection(self, inspection_id: str, action: str):
+    def override_inspection(self, inspection_id: str, action: str, roi_id: Optional[str] = None):
         """
         Records an override for a specific inspection.
         Action: "pass" or "fail"
+        roi_id: Optional, if None applies to global (legacy), otherwise specific ROI.
         """
-        print(f"[Server] Override requested for {inspection_id} -> {action}")
+        print(f"[Server] Override requested for {inspection_id} -> {action} (ROI: {roi_id})")
         with self.lock:
             last_res = self.last_inspection_result
             if not last_res or last_res.get("inspection_id") != inspection_id:
-                print(f"[Server] Override Failed: Inspection ID mismatch or missing. Last: {last_res.get('inspection_id') if last_res else 'None'}")
+                print(f"[Server] Override Failed: ID mismatch or missing.")
                 raise Exception("Inspection not found or expired")
 
             frame_path = self.last_inspection_frame_path
             if not frame_path or not os.path.exists(frame_path):
-                print(f"[Server] Override Failed: Frame path missing {frame_path}")
+                print(f"[Server] Override Failed: Frame path missing.")
                 raise Exception("Inspection frame missing")
 
             current_rois = self.roi_data
 
-            # Original decision
+            # Original Global Decision
             original_passed = last_res.get("passed", False)
 
-            # New decision
+            # Determine New Status
             new_passed = (action.lower() == "pass")
 
-            print(f"[Server] Original: {original_passed}, New: {new_passed}")
-
-            # Determine score (just use original global score or 0.0)
-            score = 0.0
+            # --- Per-ROI Logic ---
             roi_results = last_res.get("roi_results", {})
-            if roi_results:
+
+            # If roi_id is provided, we only override that ROI's status
+            # And then re-evaluate Global Status
+            if roi_id:
+                 if roi_id not in roi_results:
+                     raise Exception(f"ROI {roi_id} not found in inspection")
+
+                 # Update the specific ROI result in memory
+                 roi_results[roi_id]["passed"] = new_passed
+                 roi_results[roi_id]["overridden"] = True
+                 roi_results[roi_id]["override_status"] = "PASS" if new_passed else "FAIL"
+
+                 # Re-calculate Global Passed
+                 # Global is PASS only if ALL ROIs are PASS
+                 all_pass = all(r.get("passed", False) for r in roi_results.values())
+
+                 # Update Global Result
+                 self.last_inspection_result["passed"] = all_pass
+
+                 # For the Record, we store the *specific* ROI data if possible,
+                 # or we store the whole set but maybe we should rely on the ROI-specific learning commit logic.
+                 # The 'OverrideRecord' stores `roi` which is the definition.
+                 # It doesn't store 'which roi was overridden'.
+                 # We should probably filter the definition to ONLY the relevant ROI for the record?
+                 # So learning only learns that one.
+
+                 # Create a partial ROI definition for the record
+                 target_roi_def = next((r for r in current_rois.get("rois", []) if r["id"] == roi_id), None)
+
+                 record_roi_data = {"rois": [target_roi_def]} if target_roi_def else current_rois
+
+            else:
+                 # Legacy Global Override
+                 self.last_inspection_result["passed"] = new_passed
+                 self.last_inspection_result["overridden"] = True
+                 self.last_inspection_result["override_status"] = "PASS" if new_passed else "FAIL"
+                 record_roi_data = current_rois
+
+            # Score for record (min score of all or specific?)
+            # If specific, use that ROI's score
+            if roi_id and roi_id in roi_results:
+                score = roi_results[roi_id].get("score", 0.0)
+            else:
                 scores = [r["score"] for r in roi_results.values() if "score" in r]
-                if scores:
-                    score = min(scores)
+                score = min(scores) if scores else 0.0
 
             record = OverrideRecord(
                 inspection_id=inspection_id,
-                original_result=original_passed,
+                original_result=original_passed, # This is technically global original...
                 overridden_result=new_passed,
                 score=score,
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 image_path=frame_path,
-                roi=current_rois # Save the ROI definition used
+                roi=record_roi_data # Save specific ROI if applicable
             )
 
             self.dataset_manager.save_override(record)
             print(f"[Server] Override saved. Pending count: {self.dataset_manager.get_pending_count()}")
-
-            # Update local result to reflect override (optional, but good for UI if we polled again)
-            self.last_inspection_result["overridden"] = True
-            self.last_inspection_result["override_status"] = "PASS" if new_passed else "FAIL"
 
     def get_pending_learning_count(self) -> int:
         return self.dataset_manager.get_pending_count()
@@ -301,7 +423,9 @@ class ServerState:
                 roi_results_dict[rid] = {
                     "type": roi_type_map.get(rid, "DIGIT"), # Add Type to log
                     "passed": res.passed,
-                    "score": res.best_score
+                    "score": res.best_score,
+                    "failure_reason": res.failure_reason,
+                    "failure_detail": res.failure_detail
                 }
 
             log_data = {

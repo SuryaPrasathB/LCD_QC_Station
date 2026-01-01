@@ -1,8 +1,9 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog
+    QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog,
+    QComboBox, QCheckBox, QScrollArea, QFrame, QDialog, QFormLayout
 )
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent, Qt
 from pc_client.api.inspection_api import InspectionClient
 from pc_client.ui.live_view import LiveView
 from pc_client.ui.results_panel import ResultsPanel
@@ -96,6 +97,24 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(conn_group)
 
+        # Dataset Selector
+        self.dataset_group = QGroupBox("Dataset Management")
+        ds_layout = QHBoxLayout()
+
+        self.combo_datasets = QComboBox()
+        self.combo_datasets.currentIndexChanged.connect(self.on_dataset_changed)
+
+        self.btn_new_dataset = QPushButton("New...")
+        self.btn_new_dataset.clicked.connect(self.create_dataset_prompt)
+
+        ds_layout.addWidget(QLabel("Active Dataset:"))
+        ds_layout.addWidget(self.combo_datasets, 1)
+        ds_layout.addWidget(self.btn_new_dataset)
+
+        self.dataset_group.setLayout(ds_layout)
+        self.dataset_group.setVisible(False) # Hidden until connected
+        left_layout.addWidget(self.dataset_group)
+
         # Live View
         self.live_view = LiveView()
         self.live_view.roi_drawn.connect(self.on_roi_drawn)
@@ -137,8 +156,7 @@ class MainWindow(QMainWindow):
 
         # Results Panel
         self.results_panel = ResultsPanel()
-        self.results_panel.override_pass.connect(lambda: self.trigger_override("pass"))
-        self.results_panel.override_fail.connect(lambda: self.trigger_override("fail"))
+        self.results_panel.override_action.connect(self.trigger_roi_override)
         right_layout.addWidget(self.results_panel)
 
         # Learning Panel
@@ -196,6 +214,7 @@ class MainWindow(QMainWindow):
 
     def apply_state(self, connected: bool):
         self.ctrl_group.setEnabled(connected)
+        self.dataset_group.setVisible(connected)
         self.txt_ip.setEnabled(not connected)
         self.txt_port.setEnabled(not connected)
         self.results_panel.set_buttons_enabled(connected and self.current_inspection_id is not None)
@@ -205,6 +224,7 @@ class MainWindow(QMainWindow):
             self.lbl_conn_status.setText("● Connected")
             self.lbl_conn_status.setObjectName("status_connected")
             self.live_timer.start()
+            self.refresh_datasets()
         else:
             self.btn_connect.setText("Connect")
             self.lbl_conn_status.setText("● Disconnected")
@@ -353,16 +373,16 @@ class MainWindow(QMainWindow):
         worker = self.start_worker(self.client.get_inspection_frame)
         worker.result_ready.connect(self.update_live_view)
 
-    def trigger_override(self, action):
+    def trigger_roi_override(self, action, roi_id):
         if not self.current_inspection_id:
             return
 
-        print(f"[Client] Triggering Override: {action}")
-        worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action)
-        worker.result_ready.connect(lambda: self.on_override_complete(action))
+        print(f"[Client] Triggering Override: {action} on {roi_id}")
+        worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action, roi_id)
+        worker.result_ready.connect(lambda: self.on_override_complete(action, roi_id))
 
-    def on_override_complete(self, action):
-        QMessageBox.information(self, "Override", f"Marked as {action.upper()}")
+    def on_override_complete(self, action, roi_id):
+        QMessageBox.information(self, "Override", f"Marked {roi_id} as {action.upper()}")
         self.refresh_learning_status()
 
     def refresh_learning_status(self):
@@ -377,3 +397,43 @@ class MainWindow(QMainWindow):
         worker = self.start_worker(self.client.commit_learning)
         worker.result_ready.connect(lambda res: QMessageBox.information(self, "Learning", f"Committed: {res.get('message')}"))
         worker.result_ready.connect(lambda: self.refresh_learning_status())
+
+    # --- Dataset & Config ---
+
+    def refresh_datasets(self):
+        worker = self.start_worker(self.client.list_datasets)
+        worker.result_ready.connect(self.update_dataset_combo)
+
+    def update_dataset_combo(self, data):
+        datasets = data.get("datasets", [])
+        active = data.get("active", "")
+
+        self.combo_datasets.blockSignals(True)
+        self.combo_datasets.clear()
+
+        idx = 0
+        for i, name in enumerate(datasets):
+            self.combo_datasets.addItem(name)
+            if name == active:
+                idx = i
+
+        self.combo_datasets.setCurrentIndex(idx)
+        self.combo_datasets.blockSignals(False)
+
+    def on_dataset_changed(self, index):
+        name = self.combo_datasets.currentText()
+        print(f"[Client] Switching dataset to {name}")
+        worker = self.start_worker(self.client.select_dataset, name)
+        worker.result_ready.connect(lambda res: print(f"Switched to {res['name']}"))
+        worker.result_ready.connect(self.clear_ui_on_dataset_switch)
+
+    def clear_ui_on_dataset_switch(self):
+        self.results_panel.clear()
+        self.live_view.set_frame(None) # Wait for next frame
+
+    def create_dataset_prompt(self):
+        name, ok = QInputDialog.getText(self, "New Dataset", "Dataset Name (Product):")
+        if ok and name:
+            worker = self.start_worker(self.client.create_dataset, name)
+            worker.result_ready.connect(self.refresh_datasets)
+            worker.error_occurred.connect(lambda e: QMessageBox.warning(self, "Error", f"Failed: {e}"))

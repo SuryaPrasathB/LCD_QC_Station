@@ -29,7 +29,8 @@ class ROIManager:
                     {
                         "id": "...",
                         "type": "DIGIT|ICON|TEXT",
-                        "bbox": {"x": int, "y": int, "w": int, "h": int}
+                        "bbox": {"x": int, "y": int, "w": int, "h": int},
+                        "force_pass": bool
                     },
                     ...
                 ],
@@ -62,6 +63,7 @@ class ROIManager:
                     upgraded_rois.append({
                         "id": r["id"],
                         "type": r.get("type", "DIGIT"),
+                        "force_pass": r.get("force_pass", False),
                         "bbox": {
                             "x": r["x"],
                             "y": r["y"],
@@ -84,6 +86,7 @@ class ROIManager:
                     "rois": [{
                         "id": "digits_main", # Default ID for legacy
                         "type": "DIGIT",
+                        "force_pass": False,
                         "bbox": {
                             "x": data["x"],
                             "y": data["y"],

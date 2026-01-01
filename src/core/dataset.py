@@ -20,8 +20,9 @@ class OverrideRecord:
 class DatasetManager:
     """
     Manages the dataset versioning, inspections, and overrides.
+    Supports multiple named datasets (products).
     """
-    DATA_DIR = "data"
+    DATA_ROOT = "data"
     REF_DIR = "reference"
     INSPECTIONS_DIR = "inspections"
     OVERRIDES_DIR = "overrides"
@@ -31,9 +32,13 @@ class DatasetManager:
     # Files that might exist at root of a version (Legacy)
     ROOT_FILES = ["roi.json", "reference.jpg", "reference.png"]
 
-    def __init__(self, root_dir: str = "."):
+    def __init__(self, root_dir: str = ".", dataset_name: str = "default"):
         self.root_dir = root_dir
-        self.data_path = os.path.join(root_dir, self.DATA_DIR)
+        self.dataset_name = dataset_name
+
+        # Path: root/data/{dataset_name}/
+        self.data_path = os.path.join(root_dir, self.DATA_ROOT, dataset_name)
+
         self.ref_base_path = os.path.join(self.data_path, self.REF_DIR)
         self.inspections_path = os.path.join(self.data_path, self.INSPECTIONS_DIR)
         self.overrides_path = os.path.join(self.data_path, self.OVERRIDES_DIR)
@@ -44,7 +49,7 @@ class DatasetManager:
 
     def initialize(self):
         """
-        Sets up the directory structure and migrates existing files if needed.
+        Sets up the directory structure.
         """
         # Create directories
         os.makedirs(self.ref_base_path, exist_ok=True)
@@ -61,25 +66,9 @@ class DatasetManager:
             self.active_version = "v1"
             self._write_version_file(self.active_version, "Initial version", None)
 
-            # Migration Logic (Legacy -> v1 folder)
+            # Create v1 folder
             v1_path = os.path.join(self.ref_base_path, "v1")
             os.makedirs(v1_path, exist_ok=True)
-
-            migrated = False
-            for filename in self.ROOT_FILES:
-                src = os.path.join(self.root_dir, filename)
-                if os.path.exists(src):
-                    dst = os.path.join(v1_path, filename)
-                    try:
-                        shutil.move(src, dst)
-                        print(f"Migrated {src} to {dst}")
-                        migrated = True
-                    except Exception as e:
-                        print(f"Error migrating {src}: {e}")
-
-            if not migrated and not os.listdir(v1_path):
-                # Only log if empty, no error
-                pass
 
     def _write_version_file(self, version: str, description: str, based_on: Optional[str]):
         data = {

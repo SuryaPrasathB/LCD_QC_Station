@@ -38,6 +38,16 @@ class ROIStatus(BaseModel):
 class OverrideRequest(BaseModel):
     inspection_id: str
     action: str # "pass" or "fail"
+    roi_id: Optional[str] = None # Optional for legacy compatibility, but preferred
+
+class DatasetCreateRequest(BaseModel):
+    name: str
+
+class DatasetSelectRequest(BaseModel):
+    name: str
+
+class ROIOverrideConfig(BaseModel):
+    force_pass: bool
 
 # Helper to encode image
 def encode_image(img: np.ndarray) -> bytes:
@@ -93,6 +103,9 @@ def draw_rois_on_frame(img: np.ndarray, rois: List[Dict], results: Dict = None, 
 
         # Draw Label: ID (Type)
         label = f"{roi.id} ({roi.type})"
+        if roi.force_pass:
+            label += " [FORCE]"
+
         cv2.putText(out, label, (rx, ry-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
     return out
@@ -105,6 +118,7 @@ def health_check():
         "device": "raspberry_pi",
         "camera": "ready" if state.camera.is_running() else "stopped",
         "inspection_method": "hybrid",
+        "dataset_name": state.get_active_dataset_name(),
         "active_dataset_version": state.dataset_manager.active_version,
         "model_version": "embedding_v2"
     }
@@ -139,7 +153,7 @@ def get_live_frame_rois():
 
     return Response(content=encode_image(annotated), media_type="image/jpeg")
 
-@app.get("/roi/list", response_model=ROIList)
+@app.get("/roi/list") # Removed response_model to handle new fields easily
 def list_rois():
     state = ServerState.get_instance()
     raw_rois = state.get_roi_list()
@@ -159,6 +173,7 @@ def list_rois():
         out_rois.append({
             "id": roi.id,
             "type": roi.type,
+            "force_pass": roi.force_pass,
             "normalized_bbox": {
                 "x": roi.x / w,
                 "y": roi.y / h,
@@ -199,9 +214,17 @@ def set_roi(roi: ROIDefinition):
     abs_w = int(roi.normalized_bbox.w * w)
     abs_h = int(roi.normalized_bbox.h * h)
 
+    # Check if existing to preserve flags like force_pass
+    existing_force_pass = False
+    for r in current_rois:
+        if r["id"] == roi.id:
+            existing_force_pass = r.get("force_pass", False)
+            break
+
     new_entry = {
         "id": roi.id,
         "type": roi.type.value,
+        "force_pass": existing_force_pass,
         "bbox": {
             "x": abs_x, "y": abs_y, "w": abs_w, "h": abs_h
         }
@@ -219,6 +242,14 @@ def set_roi(roi: ROIDefinition):
 
     state.update_rois(new_rois, w, h)
     return {"status": "updated", "count": len(new_rois)}
+
+@app.post("/roi/{roi_id}/config")
+def set_roi_config(roi_id: str, config: ROIOverrideConfig):
+    state = ServerState.get_instance()
+    success = state.set_roi_override(roi_id, config.force_pass)
+    if not success:
+         raise HTTPException(status_code=404, detail="ROI not found")
+    return {"status": "updated", "roi_id": roi_id, "force_pass": config.force_pass}
 
 @app.post("/roi/clear")
 def clear_rois():
@@ -256,9 +287,9 @@ def get_inspection_result():
 def override_inspection(req: OverrideRequest):
     state = ServerState.get_instance()
     try:
-        print(f"[API] Override Request: {req.inspection_id}, {req.action}")
-        state.override_inspection(req.inspection_id, req.action)
-        return {"status": "ok", "action": req.action}
+        print(f"[API] Override Request: {req.inspection_id}, {req.action}, ROI: {req.roi_id}")
+        state.override_inspection(req.inspection_id, req.action, req.roi_id)
+        return {"status": "ok", "action": req.action, "roi_id": req.roi_id}
     except Exception as e:
         print(f"[API] Override Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -300,3 +331,26 @@ def get_inspection_frame():
     annotated = draw_rois_on_frame(img, rois, results, stored_w, stored_h)
 
     return Response(content=encode_image(annotated), media_type="image/jpeg")
+
+# --- Datasets API ---
+
+@app.get("/datasets")
+def list_datasets():
+    state = ServerState.get_instance()
+    return {"datasets": state.list_datasets(), "active": state.get_active_dataset_name()}
+
+@app.post("/datasets")
+def create_dataset(req: DatasetCreateRequest):
+    state = ServerState.get_instance()
+    success = state.create_dataset(req.name)
+    if not success:
+        raise HTTPException(status_code=400, detail="Dataset already exists or invalid name")
+    return {"status": "created", "name": req.name}
+
+@app.post("/datasets/select")
+def select_dataset(req: DatasetSelectRequest):
+    state = ServerState.get_instance()
+    success = state.set_active_dataset(req.name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {"status": "selected", "name": req.name}

@@ -11,6 +11,7 @@ from src.core.roi_model import NormalizedROI, normalize_roi
 logger = logging.getLogger(__name__)
 
 ORB_GATE_THRESHOLD = 0.50
+MISSING_STRUCTURE_RATIO_THRESHOLD = 0.03
 
 @dataclass
 class ROIResult:
@@ -23,6 +24,12 @@ class ROIResult:
     heatmap: Optional[np.ndarray] = None
     orb_passed: Optional[bool] = None
     embedding_passed: Optional[bool] = None
+    # Semantic fields
+    type: str = "DIGIT"
+    similarity_passed: Optional[bool] = None
+    semantic_passed: Optional[bool] = None
+    failure_reason: Optional[str] = None
+    failure_detail: Optional[str] = None
 
 @dataclass
 class InspectionResult:
@@ -40,6 +47,69 @@ class InspectionResult:
     orb_passed: Optional[bool] = None
     embedding_passed: Optional[bool] = None
     decision_path: Optional[str] = None # Aggregate path
+
+def _get_cropped_reference(ref_img: np.ndarray, roi: NormalizedROI) -> np.ndarray:
+    """
+    Helper to crop or resize reference image to match ROI dimensions.
+    Handles legacy full-frame references.
+    """
+    x, y, w, h = roi.x, roi.y, roi.w, roi.h
+    ref_h, ref_w = ref_img.shape[:2]
+
+    # Detect legacy full-frame reference
+    if ref_h > h * 1.5 or ref_w > w * 1.5:
+        # Legacy Mode: Crop the reference using the ROI coordinates
+        if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
+            # Fallback: simple resize if crop is out of bounds
+            return cv2.resize(ref_img, (w, h))
+        else:
+            return ref_img[y:y+h, x:x+w]
+    else:
+        # Modern Mode: Reference is already cropped
+        return ref_img
+
+def _validate_semantic_structure(
+    captured_roi: np.ndarray,
+    reference_roi: np.ndarray,
+    roi_type: str
+) -> Tuple[bool, float, Optional[str]]:
+    """
+    Deterministic semantic validation using structural difference.
+    Returns (passed, score, detail).
+    Score is the mismatch ratio (lower is better).
+    """
+    # 1. Ensure sizes match
+    if captured_roi.shape != reference_roi.shape:
+        reference_roi = cv2.resize(reference_roi, (captured_roi.shape[1], captured_roi.shape[0]))
+
+    # 2. Convert to Grayscale
+    gray_cap = cv2.cvtColor(captured_roi, cv2.COLOR_BGR2GRAY)
+    gray_ref = cv2.cvtColor(reference_roi, cv2.COLOR_BGR2GRAY)
+
+    # 3. Apply Otsu Thresholding to get binary structure masks
+    # We use Otsu to automatically find the split between foreground/background
+    _, mask_cap = cv2.threshold(gray_cap, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, mask_ref = cv2.threshold(gray_ref, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 4. Compute Structural Difference (Absolute Difference)
+    diff = cv2.absdiff(mask_ref, mask_cap)
+
+    # 5. Calculate Mismatch Ratio
+    mismatch_pixels = np.count_nonzero(diff)
+    total_pixels = diff.size
+
+    if total_pixels == 0:
+        return False, 1.0, "zero_pixels"
+
+    ratio = mismatch_pixels / total_pixels
+
+    passed = ratio <= MISSING_STRUCTURE_RATIO_THRESHOLD
+
+    detail = None
+    if not passed:
+        detail = f"structure_mismatch_ratio_{ratio:.4f}"
+
+    return passed, ratio, detail
 
 def _perform_ssim_inspection(
     captured_img: np.ndarray,
@@ -72,18 +142,7 @@ def _perform_ssim_inspection(
         if ref_h < h or ref_w < w:
             continue
 
-        # Detect legacy full-frame reference
-        # If ref is significantly larger than ROI, assume it's a full-frame image and crop it.
-        if ref_h > h * 1.5 or ref_w > w * 1.5:
-             # Legacy Mode: Crop the reference using the ROI coordinates
-             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-                  # ROI outside reference bounds? Fallback to resize or skip
-                  ref_roi = cv2.resize(ref_img, (w, h))
-             else:
-                  ref_roi = ref_img[y:y+h, x:x+w]
-        else:
-             # Modern Mode: Reference is already cropped
-             ref_roi = ref_img
+        ref_roi = _get_cropped_reference(ref_img, roi)
 
         # Ensure exact size match for SSIM
         if ref_roi.shape != roi_cap.shape:
@@ -144,7 +203,7 @@ def _perform_orb_inspection(
     kp_cap, des_cap = orb.detectAndCompute(gray_cap, None)
 
     # Debug Logging
-    print(f"DEBUG: ROI {roi_id}: Capture Features: {len(kp_cap) if kp_cap else 0}")
+    logger.debug(f"ROI {roi_id}: Capture Features: {len(kp_cap) if kp_cap else 0}")
 
     if des_cap is None:
         return ROIResult(roi_id, False, 0.0, "none", "ORB_NO_FEATURES")
@@ -157,23 +216,14 @@ def _perform_orb_inspection(
     for ref_id, ref_img in reference_images.items():
         ref_h, ref_w = ref_img.shape[:2]
 
-        # Detect legacy full-frame reference
-        if ref_h > h * 1.5 or ref_w > w * 1.5:
-             # Legacy Mode: Crop
-             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-                  ref_roi = cv2.resize(ref_img, (w, h))
-             else:
-                  ref_roi = ref_img[y:y+h, x:x+w]
-        else:
-             # Modern Mode
-             ref_roi = ref_img
+        ref_roi = _get_cropped_reference(ref_img, roi)
 
         gray_ref = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY)
         gray_ref = cv2.GaussianBlur(gray_ref, (5, 5), 0)
 
         kp_ref, des_ref = orb.detectAndCompute(gray_ref, None)
 
-        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Features: {len(kp_ref) if kp_ref else 0}")
+        logger.debug(f"ROI {roi_id} Ref {ref_id}: Features: {len(kp_ref) if kp_ref else 0}")
 
         if des_ref is None or len(des_ref) == 0:
             scores[ref_id] = 0.0
@@ -182,7 +232,7 @@ def _perform_orb_inspection(
         try:
             matches = bf.knnMatch(des_ref, des_cap, k=2)
         except Exception as e:
-            print(f"DEBUG: ROI {roi_id}: ORB match error: {e}")
+            logger.debug(f"ROI {roi_id}: ORB match error: {e}")
             scores[ref_id] = 0.0
             continue
 
@@ -197,7 +247,7 @@ def _perform_orb_inspection(
         score = len(good) / denom if denom > 0 else 0.0
         scores[ref_id] = score
 
-        print(f"DEBUG: ROI {roi_id} Ref {ref_id}: Score {score:.4f} ({len(good)} matches)")
+        logger.debug(f"ROI {roi_id} Ref {ref_id}: Score {score:.4f} ({len(good)} matches)")
 
         if score > best_score:
             best_score = score
@@ -349,25 +399,80 @@ def inspect_roi(
     method: str
 ) -> ROIResult:
     """
-    Type-aware inspection router.
-    Currently maps all types to the same method, but prepares for future specialization.
+    Type-aware inspection router with semantic validation layer.
     """
-    # Force method from argument (env var) if present, but we can also switch on type here
-    # The requirement is: "if roi.type == DIGIT... return inspect_...".
+    # 0. Override Check
+    if roi.force_pass:
+        return ROIResult(
+            roi_id=roi.id,
+            passed=True,
+            best_score=1.0,
+            best_reference_id="forced_pass",
+            decision_path="FORCED_PASS",
+            type=roi.type,
+            similarity_passed=True,
+            semantic_passed=True,
+            failure_reason=None
+        )
 
-    # We use the 'method' argument as the base strategy (orb, embedding, hybrid)
-    # But effectively we call the same underlying functions for now.
+    # 1. Similarity Inspection
+    res = _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
 
-    if roi.type == "DIGIT":
-        # Call dispatcher
-        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
-    elif roi.type == "ICON":
-        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
-    elif roi.type == "TEXT":
-        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+    # Populate Type
+    res.type = roi.type
+    res.similarity_passed = res.passed
+
+    # 2. Semantic Validation (only if Similarity passed)
+    if res.passed and res.best_reference_id != "none":
+        best_ref_img = refs.get(res.best_reference_id)
+
+        if best_ref_img is None:
+            # Should not happen if logic is correct, but safe fallback
+            logger.error(f"ROI {roi.id}: Best reference {res.best_reference_id} not found in refs.")
+            # Fallback to similarity result as per requirements
+            res.semantic_passed = True
+            res.failure_reason = "semantic_ref_missing"
+        else:
+            # Extract Capture ROI
+            x, y, w, h = roi.x, roi.y, roi.w, roi.h
+            img_h, img_w = captured_img.shape[:2]
+
+            # Bounds check again (redundant but safe)
+            if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
+                 res.passed = False
+                 res.semantic_passed = False
+                 res.failure_reason = "bounds_error_in_semantic"
+            else:
+                 roi_cap = captured_img[y:y+h, x:x+w]
+
+                 # Prepare Reference
+                 roi_ref = _get_cropped_reference(best_ref_img, roi)
+
+                 # Perform Check
+                 try:
+                     sem_passed, sem_score, sem_detail = _validate_semantic_structure(roi_cap, roi_ref, roi.type)
+
+                     res.semantic_passed = sem_passed
+
+                     if not sem_passed:
+                         res.passed = False # Override result to FAIL
+                         res.failure_reason = "semantic_failure"
+                         res.failure_detail = sem_detail
+                         logger.debug(f"ROI {roi.id} Semantic FAIL: {sem_detail} (Score {sem_score:.4f})")
+                     else:
+                         logger.debug(f"ROI {roi.id} Semantic PASS (Score {sem_score:.4f})")
+                 except Exception as e:
+                     logger.error(f"ROI {roi.id}: Semantic validation crashed: {e}")
+                     # Fallback safely: "Do NOT crash inspection" -> Fallback to similarity result
+                     # User said: "Log error, Fallback to similarity result"
+                     res.semantic_passed = True # Assume Pass since we can't verify and similarity passed
+                     res.failure_reason = "semantic_error_fallback"
+
     else:
-        # Fallback
-        return _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method)
+        # Similarity failed or no ref found
+        res.semantic_passed = None # Skipped
+
+    return res
 
 def _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method):
     if method == "orb":
