@@ -38,6 +38,7 @@ class ROIStatus(BaseModel):
 class OverrideRequest(BaseModel):
     inspection_id: str
     action: str # "pass" or "fail"
+    roi_id: Optional[str] = None # Optional for legacy compatibility, but preferred
 
 class DatasetCreateRequest(BaseModel):
     name: str
@@ -286,9 +287,9 @@ def get_inspection_result():
 def override_inspection(req: OverrideRequest):
     state = ServerState.get_instance()
     try:
-        print(f"[API] Override Request: {req.inspection_id}, {req.action}")
-        state.override_inspection(req.inspection_id, req.action)
-        return {"status": "ok", "action": req.action}
+        print(f"[API] Override Request: {req.inspection_id}, {req.action}, ROI: {req.roi_id}")
+        state.override_inspection(req.inspection_id, req.action, req.roi_id)
+        return {"status": "ok", "action": req.action, "roi_id": req.roi_id}
     except Exception as e:
         print(f"[API] Override Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))

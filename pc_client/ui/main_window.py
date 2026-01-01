@@ -31,45 +31,6 @@ class ApiWorker(QThread):
         finally:
             self.finished_task.emit(self)
 
-class ROISettingsDialog(QDialog):
-    def __init__(self, rois, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("ROI Configuration")
-        self.resize(400, 300)
-        self.rois = rois
-        self.updated_configs = {} # roi_id -> force_pass
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        form = QFormLayout(content)
-
-        self.checks = {}
-        for r in self.rois:
-            rid = r['id']
-            force = r.get('force_pass', False)
-
-            cb = QCheckBox("Force PASS (Bypass Semantic Check)")
-            cb.setChecked(force)
-            cb.toggled.connect(lambda checked, i=rid: self.on_change(i, checked))
-
-            form.addRow(f"{rid} ({r.get('type','?')})", cb)
-            self.checks[rid] = cb
-
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
-
-        btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.accept)
-        layout.addWidget(btn_close)
-
-    def on_change(self, rid, checked):
-        self.updated_configs[rid] = checked
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -172,9 +133,6 @@ class MainWindow(QMainWindow):
         self.btn_setup.setCheckable(True)
         self.btn_setup.toggled.connect(self.toggle_setup_mode)
 
-        self.btn_roi_config = QPushButton("ROI Config / Overrides")
-        self.btn_roi_config.clicked.connect(self.open_roi_config)
-
         self.btn_clear = QPushButton("Clear ROIs")
         self.btn_clear.setObjectName("danger_button")
         self.btn_clear.clicked.connect(self.clear_rois)
@@ -188,7 +146,6 @@ class MainWindow(QMainWindow):
         self.btn_inspect.clicked.connect(self.start_inspection)
 
         ctrl_layout.addWidget(self.btn_setup)
-        ctrl_layout.addWidget(self.btn_roi_config)
         ctrl_layout.addWidget(self.btn_clear)
         ctrl_layout.addWidget(self.btn_commit)
         ctrl_layout.addSpacing(10)
@@ -199,8 +156,7 @@ class MainWindow(QMainWindow):
 
         # Results Panel
         self.results_panel = ResultsPanel()
-        self.results_panel.override_pass.connect(lambda: self.trigger_override("pass"))
-        self.results_panel.override_fail.connect(lambda: self.trigger_override("fail"))
+        self.results_panel.override_action.connect(self.trigger_roi_override)
         right_layout.addWidget(self.results_panel)
 
         # Learning Panel
@@ -417,16 +373,16 @@ class MainWindow(QMainWindow):
         worker = self.start_worker(self.client.get_inspection_frame)
         worker.result_ready.connect(self.update_live_view)
 
-    def trigger_override(self, action):
+    def trigger_roi_override(self, action, roi_id):
         if not self.current_inspection_id:
             return
 
-        print(f"[Client] Triggering Override: {action}")
-        worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action)
-        worker.result_ready.connect(lambda: self.on_override_complete(action))
+        print(f"[Client] Triggering Override: {action} on {roi_id}")
+        worker = self.start_worker(self.client.override_inspection, self.current_inspection_id, action, roi_id)
+        worker.result_ready.connect(lambda: self.on_override_complete(action, roi_id))
 
-    def on_override_complete(self, action):
-        QMessageBox.information(self, "Override", f"Marked as {action.upper()}")
+    def on_override_complete(self, action, roi_id):
+        QMessageBox.information(self, "Override", f"Marked {roi_id} as {action.upper()}")
         self.refresh_learning_status()
 
     def refresh_learning_status(self):
@@ -481,18 +437,3 @@ class MainWindow(QMainWindow):
             worker = self.start_worker(self.client.create_dataset, name)
             worker.result_ready.connect(self.refresh_datasets)
             worker.error_occurred.connect(lambda e: QMessageBox.warning(self, "Error", f"Failed: {e}"))
-
-    def open_roi_config(self):
-        worker = self.start_worker(self.client.get_roi_list)
-        worker.result_ready.connect(self.show_roi_config_dialog)
-
-    def show_roi_config_dialog(self, rois):
-        if not rois:
-            QMessageBox.information(self, "Info", "No ROIs defined.")
-            return
-
-        dlg = ROISettingsDialog(rois, self)
-        if dlg.exec():
-            # Apply changes
-            for rid, val in dlg.updated_configs.items():
-                self.start_worker(self.client.set_roi_config, rid, val)
