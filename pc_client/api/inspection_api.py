@@ -111,12 +111,13 @@ class InspectionClient:
         resp.raise_for_status()
         return resp.content
 
-    def override_inspection(self, inspection_id: str, action: str) -> Dict:
+    def override_inspection(self, inspection_id: str, action: str, roi_id: Optional[str] = None) -> Dict:
         """POST /inspection/override"""
-        print(f"[Client] Overriding inspection {inspection_id} -> {action}")
+        print(f"[Client] Overriding inspection {inspection_id} -> {action} (ROI: {roi_id})")
         payload = {
             "inspection_id": inspection_id,
-            "action": action
+            "action": action,
+            "roi_id": roi_id
         }
         resp = requests.post(f"{self.base_url}/inspection/override", json=payload, timeout=self.timeout)
         resp.raise_for_status()
