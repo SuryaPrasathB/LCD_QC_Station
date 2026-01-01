@@ -30,6 +30,8 @@ class ROIResult:
     semantic_passed: Optional[bool] = None
     failure_reason: Optional[str] = None
     failure_detail: Optional[str] = None
+    # Robustness
+    best_candidate_img: Optional[np.ndarray] = None
 
 @dataclass
 class InspectionResult:
@@ -67,6 +69,90 @@ def _get_cropped_reference(ref_img: np.ndarray, roi: NormalizedROI) -> np.ndarra
     else:
         # Modern Mode: Reference is already cropped
         return ref_img
+
+def _apply_lighting_normalization(img: np.ndarray) -> np.ndarray:
+    """
+    Apply CLAHE to L-channel in LAB space.
+    Deterministic lighting correction.
+    """
+    try:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge((l, a, b))
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    except Exception as e:
+        logger.error(f"Normalization failed: {e}")
+        return img
+
+def _generate_pose_candidates(full_img: np.ndarray, roi: NormalizedROI) -> List[Tuple[np.ndarray, str]]:
+    """
+    Generate bounded pose variants: Original, Rot +/- 1.5, Shift +/- 2px.
+    Returns list of (image_crop, description).
+    """
+    candidates = []
+    x, y, w, h = roi.x, roi.y, roi.w, roi.h
+    img_h, img_w = full_img.shape[:2]
+
+    # Margin to handle shifts and rotation corners
+    margin = 10
+
+    # Calculate Super Crop bounds
+    sx = x - margin
+    sy = y - margin
+    sw = w + 2 * margin
+    sh = h + 2 * margin
+
+    # Handle boundaries with padding if needed
+    # Extract valid region
+    src_x = max(0, sx)
+    src_y = max(0, sy)
+    src_w = min(img_w, sx + sw) - src_x
+    src_h = min(img_h, sy + sh) - src_y
+
+    if src_w <= 0 or src_h <= 0:
+        # Should not happen if ROI is valid
+        return []
+
+    valid_crop = full_img[src_y:src_y+src_h, src_x:src_x+src_w]
+
+    # Calculate padding amounts
+    top = src_y - sy
+    bottom = (sy + sh) - (src_y + src_h)
+    left = src_x - sx
+    right = (sx + sw) - (src_x + src_w)
+
+    # Pad to create Super Crop of size (sw, sh)
+    super_crop = cv2.copyMakeBorder(valid_crop, top, bottom, left, right, cv2.BORDER_REPLICATE)
+
+    # Normalize the Super Crop ONCE
+    super_crop = _apply_lighting_normalization(super_crop)
+
+    # Coordinates of ROI in Super Crop
+    # Top-left of ROI is at (margin, margin)
+
+    # 1. Original (0, 0)
+    original = super_crop[margin:margin+h, margin:margin+w].copy()
+    candidates.append((original, "original"))
+
+    # 2. Rotations (+/- 1.5 deg)
+    center = (margin + w / 2.0, margin + h / 2.0)
+    for angle in [-1.5, 1.5]:
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(super_crop, M, (sw, sh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        crop = rotated[margin:margin+h, margin:margin+w].copy()
+        candidates.append((crop, f"rot_{angle}"))
+
+    # 3. Translations (+/- 2px)
+    # Just crop from super_crop at shifted offsets
+    for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
+        tx = margin + dx
+        ty = margin + dy
+        crop = super_crop[ty:ty+h, tx:tx+w].copy()
+        candidates.append((crop, f"shift_x_{dx}_y_{dy}"))
+
+    return candidates
 
 def _validate_semantic_structure(
     captured_roi: np.ndarray,
@@ -288,73 +374,107 @@ def _perform_embedding_inspection(
     dataset_version: str
 ) -> ROIResult:
     """
-    Embedding inspection for a SINGLE ROI.
+    Embedding inspection with Pose Robustness & Lighting Normalization.
     """
     model = EmbeddingModel.get_instance()
-    x, y, w, h = roi.x, roi.y, roi.w, roi.h
     roi_id = roi.id
 
     if model.session is None:
-        # Fallback to ORB if model missing (unlikely in prod but safe)
+        # Fallback to ORB if model missing
         return _perform_orb_inspection(captured_img, reference_images, roi, 0.75)
 
-    img_h, img_w = captured_img.shape[:2]
-    if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
+    # 1. Generate Candidates (Includes Pre-Normalization)
+    # This returns [ (img, desc), ... ] with Normalized Images
+    candidates = _generate_pose_candidates(captured_img, roi)
+
+    if not candidates:
          return ROIResult(roi_id, False, 0.0, "none", "BOUNDS_ERROR")
 
-    roi_cap = captured_img[y:y+h, x:x+w]
-    emb_cap = model.compute_embedding(roi_cap)
-    
-    if emb_cap is None:
-         return ROIResult(roi_id, False, 0.0, "none", "EMBEDDING_FAIL")
-
     scores = {}
-    best_distance = float('inf')
-    best_ref_id = "none"
+    
+    # Track the global best match across all poses and all references
+    global_best_distance = float('inf')
+    global_best_ref_id = "none"
+    global_best_candidate_img = None
+    global_best_pose_name = "none"
 
-    for ref_id, ref_img in reference_images.items():
-        ref_h, ref_w = ref_img.shape[:2]
+    # 2. Iterate Candidates
+    # Optimization: Check "original" first. If confidence high, exit.
 
-        # Detect legacy full-frame reference
-        if ref_h > h * 1.5 or ref_w > w * 1.5:
-             # Legacy Mode: Crop
-             if x < 0 or y < 0 or x + w > ref_w or y + h > ref_h:
-                  ref_roi = cv2.resize(ref_img, (w, h))
-             else:
-                  ref_roi = ref_img[y:y+h, x:x+w]
-        else:
-             # Modern Mode
-             ref_roi = ref_img
+    # We define "High Confidence" as passing the threshold with some margin,
+    # or just passing the threshold if we trust it.
+    # Requirement: "Early exit allowed if similarity crosses a high-confidence threshold"
+    # We'll use the provided threshold. If it passes, we stop.
 
-        unique_ref_key = f"{roi_id}/{ref_id}"
-        emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi)
-        if emb_ref is None:
+    for cand_idx, (cand_img, cand_name) in enumerate(candidates):
+
+        # Compute Embedding for Candidate
+        emb_cand = model.compute_embedding(cand_img)
+        if emb_cand is None:
             continue
-            
-        distance = model.compute_cosine_distance(emb_cap, emb_ref)
-        scores[ref_id] = 1.0 - distance
-        
-        if distance < best_distance:
-            best_distance = distance
-            best_ref_id = ref_id
 
-    if best_distance == float('inf'):
+        cand_best_dist = float('inf')
+        cand_best_ref = "none"
+
+        # Compare with all references
+        for ref_id, ref_img in reference_images.items():
+
+            # Prepare Reference: Crop & Normalize
+            # We must use the same normalization as the candidate
+            ref_roi_raw = _get_cropped_reference(ref_img, roi)
+            ref_roi_norm = _apply_lighting_normalization(ref_roi_raw)
+
+            # Get Embedding (using _norm key suffix to differentiate cached raw embeddings)
+            unique_ref_key = f"{roi_id}/{ref_id}_norm"
+            emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi_norm)
+
+            if emb_ref is None:
+                continue
+
+            distance = model.compute_cosine_distance(emb_cand, emb_ref)
+
+            # Store score for reporting (only for original pose typically, but we track best)
+            if cand_name == "original":
+                scores[ref_id] = 1.0 - distance
+
+            if distance < cand_best_dist:
+                cand_best_dist = distance
+                cand_best_ref = ref_id
+
+        # Update Global Best
+        if cand_best_dist < global_best_distance:
+            global_best_distance = cand_best_dist
+            global_best_ref_id = cand_best_ref
+            global_best_candidate_img = cand_img
+            global_best_pose_name = cand_name
+
+        # Early Exit Strategy: If Original passes, stop.
+        if cand_name == "original" and global_best_distance <= threshold:
+            logger.debug(f"ROI {roi_id}: Early exit on original pose. Dist: {global_best_distance:.4f}")
+            break
+
+    if global_best_distance == float('inf'):
         passed = False
         best_score = 0.0
     else:
-        passed = bool(best_distance <= threshold)
-        best_score = 1.0 - best_distance
+        passed = bool(global_best_distance <= threshold)
+        best_score = 1.0 - global_best_distance
+
+    decision_path = "EMB_PASS" if passed else "EMB_FAIL"
+    if passed and global_best_pose_name != "original":
+        decision_path += f"_adjusted_{global_best_pose_name}"
 
     return ROIResult(
         roi_id=roi_id,
         passed=passed,
         best_score=best_score,
-        best_reference_id=best_ref_id,
-        decision_path="EMB_PASS" if passed else "EMB_FAIL",
+        best_reference_id=global_best_ref_id,
+        decision_path=decision_path,
         all_scores=scores,
         heatmap=None,
         orb_passed=None,
-        embedding_passed=passed
+        embedding_passed=passed,
+        best_candidate_img=global_best_candidate_img
     )
 
 def _perform_hybrid_inspection(
@@ -433,40 +553,71 @@ def inspect_roi(
             res.semantic_passed = True
             res.failure_reason = "semantic_ref_missing"
         else:
-            # Extract Capture ROI
-            x, y, w, h = roi.x, roi.y, roi.w, roi.h
-            img_h, img_w = captured_img.shape[:2]
+            # Decide which image to use for check:
+            # Use the best_candidate_img if available (Robust Embedding found a better pose)
+            # Otherwise crop from original capture
 
-            # Bounds check again (redundant but safe)
-            if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
-                 res.passed = False
-                 res.semantic_passed = False
-                 res.failure_reason = "bounds_error_in_semantic"
+            if res.best_candidate_img is not None:
+                roi_cap = res.best_candidate_img
             else:
-                 roi_cap = captured_img[y:y+h, x:x+w]
+                x, y, w, h = roi.x, roi.y, roi.w, roi.h
+                img_h, img_w = captured_img.shape[:2]
+                if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
+                    res.passed = False
+                    res.semantic_passed = False
+                    res.failure_reason = "bounds_error_in_semantic"
+                    return res
+                else:
+                    roi_cap = captured_img[y:y+h, x:x+w]
+                    # Note: If we fell back here, it means we didn't normalize in similarity?
+                    # OR similarity didn't return a candidate.
+                    # But if we use Hybrid/Embedding, we ALWAYS normalized.
+                    # If we use ORB/SSIM, we didn't.
+                    # For consistency, if we are here and best_candidate_img is None,
+                    # we might want to normalize if we think Semantic needs it.
+                    # But the requirement is "Semantic veto on Best Aligned Pose".
+                    # If method was SSIM/ORB, we don't have aligned pose.
+                    # We leave it as is for legacy methods.
 
-                 # Prepare Reference
-                 roi_ref = _get_cropped_reference(best_ref_img, roi)
+            # Prepare Reference
+            # Semantic check must use Normalized reference if Input is Normalized.
+            # ROIResult from Embedding/Hybrid has normalized best_candidate_img.
+            # So we must normalize reference.
 
-                 # Perform Check
-                 try:
-                     sem_passed, sem_score, sem_detail = _validate_semantic_structure(roi_cap, roi_ref, roi.type)
+            roi_ref_raw = _get_cropped_reference(best_ref_img, roi)
 
-                     res.semantic_passed = sem_passed
+            # Apply normalization if we used a method that uses it (Embedding/Hybrid)
+            # Safe to apply generally if it helps robustness, as per "Lighting Normalization" req.
+            # User said: "Apply deterministic lighting normalization per ROI ... Pre-Inspection".
+            # So yes, we should apply it here too.
+            roi_ref = _apply_lighting_normalization(roi_ref_raw)
 
-                     if not sem_passed:
-                         res.passed = False # Override result to FAIL
-                         res.failure_reason = "semantic_failure"
-                         res.failure_detail = sem_detail
-                         logger.debug(f"ROI {roi.id} Semantic FAIL: {sem_detail} (Score {sem_score:.4f})")
-                     else:
-                         logger.debug(f"ROI {roi.id} Semantic PASS (Score {sem_score:.4f})")
-                 except Exception as e:
-                     logger.error(f"ROI {roi.id}: Semantic validation crashed: {e}")
-                     # Fallback safely: "Do NOT crash inspection" -> Fallback to similarity result
-                     # User said: "Log error, Fallback to similarity result"
-                     res.semantic_passed = True # Assume Pass since we can't verify and similarity passed
-                     res.failure_reason = "semantic_error_fallback"
+            # Note: If roi_cap came from `best_candidate_img`, it is already normalized.
+            # If roi_cap came from `captured_img` directly (legacy path), we should normalize it too?
+            # User requirement: "Raw ROI -> Pre-Normalization ... -> Semantic Veto".
+            # So yes, normalizing both inputs to semantic check is correct.
+
+            if res.best_candidate_img is None:
+                roi_cap = _apply_lighting_normalization(roi_cap)
+
+            # Perform Check
+            try:
+                sem_passed, sem_score, sem_detail = _validate_semantic_structure(roi_cap, roi_ref, roi.type)
+
+                res.semantic_passed = sem_passed
+
+                if not sem_passed:
+                    res.passed = False # Override result to FAIL
+                    res.failure_reason = "semantic_failure"
+                    res.failure_detail = sem_detail
+                    logger.debug(f"ROI {roi.id} Semantic FAIL: {sem_detail} (Score {sem_score:.4f})")
+                else:
+                    logger.debug(f"ROI {roi.id} Semantic PASS (Score {sem_score:.4f})")
+            except Exception as e:
+                logger.error(f"ROI {roi.id}: Semantic validation crashed: {e}")
+                # Fallback safely
+                res.semantic_passed = True
+                res.failure_reason = "semantic_error_fallback"
 
     else:
         # Similarity failed or no ref found
