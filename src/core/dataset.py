@@ -5,6 +5,8 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Union, Any
 from dataclasses import dataclass
+import cv2
+import numpy as np
 from src.core.roi_model import normalize_roi, NormalizedROI
 
 @dataclass
@@ -21,6 +23,7 @@ class DatasetManager:
     """
     Manages the dataset versioning, inspections, and overrides.
     Supports multiple named datasets (products).
+    Includes In-Memory Caching for performance.
     """
     DATA_ROOT = "data"
     REF_DIR = "reference"
@@ -47,6 +50,9 @@ class DatasetManager:
 
         self.active_version = "v1"
 
+        # Cache: {roi_id: {ref_id: np.ndarray}}
+        self._image_cache: Optional[Dict[str, Dict[str, np.ndarray]]] = None
+
     def initialize(self):
         """
         Sets up the directory structure.
@@ -69,6 +75,9 @@ class DatasetManager:
             # Create v1 folder
             v1_path = os.path.join(self.ref_base_path, "v1")
             os.makedirs(v1_path, exist_ok=True)
+
+        # Clear cache on init/re-init
+        self._image_cache = None
 
     def _write_version_file(self, version: str, description: str, based_on: Optional[str]):
         data = {
@@ -135,10 +144,41 @@ class DatasetManager:
 
         return refs
 
+    def load_all_references(self):
+        """
+        Loads all reference images for the active version into memory cache.
+        """
+        print(f"[Dataset] Loading references for {self.active_version}...")
+        path_map = self.get_active_references()
+        cache = {}
+
+        count = 0
+        for roi_id, ref_dict in path_map.items():
+            cache[roi_id] = {}
+            for ref_id, path in ref_dict.items():
+                img = cv2.imread(path)
+                if img is not None:
+                    cache[roi_id][ref_id] = img
+                    count += 1
+                else:
+                    print(f"[Dataset] Failed to load reference: {path}")
+
+        self._image_cache = cache
+        print(f"[Dataset] Loaded {count} reference images into RAM.")
+
+    def get_cached_references(self) -> Dict[str, Dict[str, np.ndarray]]:
+        """
+        Returns the cached image dictionary. Loads it if empty.
+        """
+        if self._image_cache is None:
+            self.load_all_references()
+        return self._image_cache
+
     def save_roi_reference(self, roi_id: str, source_path: str) -> bool:
         """
         Saves a reference image for a specific ROI.
         Creates the ROI subdirectory if needed.
+        Invalidates cache.
         """
         self.ensure_active_version_writable()
         v_path = self.get_active_version_path()
@@ -152,6 +192,7 @@ class DatasetManager:
 
         try:
             shutil.copy(source_path, target_path)
+            self._image_cache = None # Invalidate cache
             return True
         except IOError as e:
             print(f"Error saving reference for {roi_id}: {e}")
@@ -160,6 +201,7 @@ class DatasetManager:
     def clear_active_references(self):
         """
         Clears all references in the active version (files and subdirs).
+        Invalidates cache.
         """
         v_path = self.get_active_version_path()
         if not os.path.exists(v_path):
@@ -178,6 +220,8 @@ class DatasetManager:
                     os.remove(item_path)
             except OSError as e:
                 print(f"Error clearing path {item_path}: {e}")
+
+        self._image_cache = None # Invalidate cache
 
     def save_inspection(self, inspection_id: str, image: bytes, result_data: Dict) -> str:
         pass
@@ -269,6 +313,7 @@ class DatasetManager:
     def commit_learning(self) -> Tuple[bool, str]:
         """
         Commits pending overrides to a new dataset version.
+        Invalidates cache.
         """
         count = self.get_pending_count()
         if count == 0:
@@ -417,6 +462,8 @@ class DatasetManager:
         # 5. Update Version File
         self.active_version = new_version
         self._write_version_file(new_version, f"Learned from {learned_count} overrides", f"v{current_v_num}")
+
+        self._image_cache = None # Invalidate cache
 
         return True, f"Committed {learned_count} overrides to {new_version}."
 

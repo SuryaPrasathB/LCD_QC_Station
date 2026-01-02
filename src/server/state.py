@@ -157,6 +157,9 @@ class ServerState:
              # Reload ROIs for new dataset
              self.roi_data = self.roi_manager.load_roi()
 
+             # Reload References Cache
+             self.dataset_manager.load_all_references()
+
              print(f"[Server] Switched to dataset: {name}")
              return True
 
@@ -384,17 +387,8 @@ class ServerState:
             if img is None:
                 raise Exception("Capture failed")
 
-            # Load refs
-            refs_map = self.dataset_manager.get_active_references()
-
-            # Nested refs
-            refs_nested = {}
-            for rid, rdict in refs_map.items():
-                refs_nested[rid] = {}
-                for k, v in rdict.items():
-                     r_img = cv2.imread(v)
-                     if r_img is not None:
-                         refs_nested[rid][k] = r_img
+            # Use Cached References
+            refs_nested = self.dataset_manager.get_cached_references()
 
             roi_data = self.roi_data
             version = self.dataset_manager.active_version

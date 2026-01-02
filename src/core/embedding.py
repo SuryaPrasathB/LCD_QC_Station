@@ -4,7 +4,7 @@ import logging
 import numpy as np
 import cv2
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 # Attempt to import onnxruntime
 try:
@@ -30,7 +30,8 @@ class EmbeddingModel:
         self.input_size = (128, 128)
         self.embedding_dim = 128
         
-        # Cache: { (dataset_version, reference_id): embedding_vector }
+        # Cache: { (dataset_version, reference_id_hash): embedding_vector }
+        # ref_id should be unique combination of file + roi coords
         self._reference_cache: Dict[Tuple[str, str], np.ndarray] = {}
         
         self.load_model()
@@ -72,62 +73,87 @@ class EmbeddingModel:
             logger.error(f"Failed to load embedding model: {e}")
             self.session = None
 
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
+    def preprocess(self, images: Union[np.ndarray, List[np.ndarray]]) -> np.ndarray:
         """
-        Resize to input_size (squashing), Normalize, CHW, Batch dim.
-        Expected input: BGR image (H, W, 3)
+        Resize to input_size, Normalize, CHW, Batch dim.
+        Accepts single image (H,W,3) or list of images.
+        Returns tensor (B, 3, H, W).
         """
-        # Resize (squash)
-        # cv2.resize expects (width, height)
-        resized = cv2.resize(image, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR)
-        
-        # Convert BGR to RGB
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        
-        # Normalize to [0, 1] and standardized if needed
-        # MobileNet expects specific mean/std usually, but let's stick to simple [0,1] or standard
-        # if the training script used standard ImageNet normalization.
-        # For this implementation, let's assume standard ImageNet normalization
-        # as we used `models.mobilenet_v2(weights=...)` in the training script 
-        # but didn't specify transforms.
-        # Let's use standard ImageNet mean/std for safety as that's what the model expects.
-        img_data = rgb.astype(np.float32) / 255.0
+        if isinstance(images, np.ndarray) and images.ndim == 3:
+            images = [images]
+
+        batch_data = []
         
         # ImageNet mean/std
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img_data = (img_data - mean) / std
-        
-        # HWC -> CHW
-        img_data = img_data.transpose(2, 0, 1)
-        
-        # Add batch dimension -> BCHW
-        img_data = np.expand_dims(img_data, axis=0)
-        
-        return img_data
 
-    def compute_embedding(self, image: np.ndarray) -> Optional[np.ndarray]:
+        for img in images:
+            # Resize (squash)
+            resized = cv2.resize(img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR)
+
+            # Convert BGR to RGB
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+            # Normalize to [0, 1]
+            img_data = rgb.astype(np.float32) / 255.0
+
+            # Standardize
+            img_data = (img_data - mean) / std
+
+            # HWC -> CHW
+            img_data = img_data.transpose(2, 0, 1)
+
+            batch_data.append(img_data)
+
+        return np.array(batch_data, dtype=np.float32)
+
+    def compute_embedding(self, images: Union[np.ndarray, List[np.ndarray]]) -> Optional[np.ndarray]:
+        """
+        Computes embedding for one or multiple images.
+        Handles fixed batch-size models by iterating manually.
+        Returns (B, 128) array or None on failure.
+        """
         if self.session is None:
             return None
 
-        try:
-            input_tensor = self.preprocess(image)
+        # Helper to run single item
+        def _run_single(img_tensor_1chw):
             input_name = self.session.get_inputs()[0].name
+            # Expand dims handled in preprocess for single item?
+            # preprocess returns (1, 3, 128, 128) for single item in list? Yes.
+            outputs = self.session.run(None, {input_name: img_tensor_1chw})
+            return outputs[0][0] # (128,)
+
+        try:
+            input_tensor = self.preprocess(images) # (B, 3, 128, 128)
+
+            B = input_tensor.shape[0]
+            embeddings = []
             
-            # Run inference
-            outputs = self.session.run(None, {input_name: input_tensor})
-            embedding = outputs[0][0] # First batch element
+            for i in range(B):
+                # Slice (1, 3, 128, 128)
+                item = input_tensor[i:i+1]
+                emb = _run_single(item)
+                embeddings.append(emb)
+
+            embeddings = np.array(embeddings) # (B, 128)
             
-            return embedding
+            # Compatibility return for single raw image input (H, W, 3)
+            if isinstance(images, np.ndarray) and images.ndim == 3:
+                return embeddings[0]
+
+            return embeddings
         except Exception as e:
             logger.error(f"Inference error: {e}")
             return None
 
-    def get_reference_embedding(self, dataset_version: str, ref_id: str, ref_image: np.ndarray) -> Optional[np.ndarray]:
+    def get_reference_embedding(self, dataset_version: str, ref_key: str, ref_image: np.ndarray) -> Optional[np.ndarray]:
         """
         Returns cached embedding or computes and caches it.
+        ref_key must be unique (include ROI hash if needed).
         """
-        key = (dataset_version, ref_id)
+        key = (dataset_version, ref_key)
         if key in self._reference_cache:
             return self._reference_cache[key]
         
@@ -143,9 +169,6 @@ class EmbeddingModel:
         Distance = 1 - CosineSimilarity
         Vectors are assumed to be 1D.
         """
-        # Vectors from the model (via torch.nn.functional.normalize) should already be unit vectors if 
-        # we used that layer.
-        # But let's be safe.
         norm1 = np.linalg.norm(vec1)
         norm2 = np.linalg.norm(vec2)
         
@@ -153,7 +176,24 @@ class EmbeddingModel:
             return 1.0 # Max distance
             
         similarity = np.dot(vec1, vec2) / (norm1 * norm2)
-        # Clamp for numerical stability
         similarity = np.clip(similarity, -1.0, 1.0)
         
         return 1.0 - similarity
+
+    def compute_batch_distances(self, candidate_embeddings: np.ndarray, ref_embedding: np.ndarray) -> np.ndarray:
+        """
+        Computes distances between a batch of candidates (B, D) and a single reference (D,).
+        Returns (B,) array of distances.
+        """
+        # Normalize candidates
+        norms = np.linalg.norm(candidate_embeddings, axis=1, keepdims=True) # (B, 1)
+        candidates_norm = candidate_embeddings / (norms + 1e-8)
+
+        # Normalize reference
+        ref_norm = ref_embedding / (np.linalg.norm(ref_embedding) + 1e-8)
+
+        # Dot product
+        # (B, D) . (D,) -> (B,)
+        similarities = np.dot(candidates_norm, ref_norm)
+
+        return 1.0 - similarities

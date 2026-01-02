@@ -374,7 +374,7 @@ def _perform_embedding_inspection(
     dataset_version: str
 ) -> ROIResult:
     """
-    Embedding inspection with Pose Robustness & Lighting Normalization.
+    Embedding inspection with Batched Inference & Efficient Caching.
     """
     model = EmbeddingModel.get_instance()
     roi_id = roi.id
@@ -383,12 +383,27 @@ def _perform_embedding_inspection(
         # Fallback to ORB if model missing
         return _perform_orb_inspection(captured_img, reference_images, roi, 0.75)
 
-    # 1. Generate Candidates (Includes Pre-Normalization)
-    # This returns [ (img, desc), ... ] with Normalized Images
-    candidates = _generate_pose_candidates(captured_img, roi)
+    # 1. Generate Candidates (Batch Prep)
+    # This returns list of images
+    candidates_list = _generate_pose_candidates(captured_img, roi)
 
-    if not candidates:
+    if not candidates_list:
          return ROIResult(roi_id, False, 0.0, "none", "BOUNDS_ERROR")
+
+    # Unpack for batching
+    candidate_imgs = [c[0] for c in candidates_list]
+    candidate_names = [c[1] for c in candidates_list]
+
+    # 2. Batch Inference for Candidates
+    # (B, 128)
+    cand_embeddings = model.compute_embedding(candidate_imgs)
+
+    if cand_embeddings is None:
+         return ROIResult(roi_id, False, 0.0, "none", "INFERENCE_FAIL")
+
+    # Ensure shape (B, D) even if B=1
+    if cand_embeddings.ndim == 1:
+        cand_embeddings = np.expand_dims(cand_embeddings, axis=0)
 
     scores = {}
     
@@ -398,67 +413,62 @@ def _perform_embedding_inspection(
     global_best_candidate_img = None
     global_best_pose_name = "none"
 
-    # 2. Iterate Candidates
-    # Optimization: Check "original" first. If confidence high, exit.
+    # ROI Hash for Caching (x_y_w_h)
+    roi_hash = f"{roi.x}_{roi.y}_{roi.w}_{roi.h}"
 
-    # We define "High Confidence" as passing the threshold with some margin,
-    # or just passing the threshold if we trust it.
-    # Requirement: "Early exit allowed if similarity crosses a high-confidence threshold"
-    # We'll use the provided threshold. If it passes, we stop.
+    # 3. Compare against all references
+    # We iterate references, compute/get their embedding, and compare against ALL candidates at once
+    for ref_id, ref_img in reference_images.items():
 
-    for cand_idx, (cand_img, cand_name) in enumerate(candidates):
+        # Unique Key including ROI geometry
+        unique_ref_key = f"{roi_id}/{ref_id}/{roi_hash}"
 
-        # Compute Embedding for Candidate
-        emb_cand = model.compute_embedding(cand_img)
-        if emb_cand is None:
+        # Pre-process reference (crop & normalize) only if not in cache
+        # We rely on get_reference_embedding to handle cache
+        # But we need to pass the "raw" reference crop for it to compute if missing
+
+        # We assume ref_img is the full/raw reference loaded from disk (or cache)
+        # We need to crop/normalize it to match candidate
+        ref_roi_raw = _get_cropped_reference(ref_img, roi)
+        ref_roi_norm = _apply_lighting_normalization(ref_roi_raw)
+
+        emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi_norm)
+
+        if emb_ref is None:
             continue
 
-        cand_best_dist = float('inf')
-        cand_best_ref = "none"
+        # Compute Distances (B,) array
+        dists = model.compute_batch_distances(cand_embeddings, emb_ref)
 
-        # Compare with all references
-        for ref_id, ref_img in reference_images.items():
+        # Find best candidate for THIS reference
+        best_idx = np.argmin(dists)
+        min_dist = dists[best_idx]
 
-            # Prepare Reference: Crop & Normalize
-            # We must use the same normalization as the candidate
-            ref_roi_raw = _get_cropped_reference(ref_img, roi)
-            ref_roi_norm = _apply_lighting_normalization(ref_roi_raw)
-
-            # Get Embedding (using _norm key suffix to differentiate cached raw embeddings)
-            unique_ref_key = f"{roi_id}/{ref_id}_norm"
-            emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi_norm)
-
-            if emb_ref is None:
-                continue
-
-            distance = model.compute_cosine_distance(emb_cand, emb_ref)
-
-            # Store score for reporting (only for original pose typically, but we track best)
-            if cand_name == "original":
-                scores[ref_id] = 1.0 - distance
-
-            if distance < cand_best_dist:
-                cand_best_dist = distance
-                cand_best_ref = ref_id
+        # Record "original" pose score for reporting
+        # Original is always index 0 (as per generate_pose_candidates)
+        scores[ref_id] = float(1.0 - dists[0])
 
         # Update Global Best
-        if cand_best_dist < global_best_distance:
-            global_best_distance = cand_best_dist
-            global_best_ref_id = cand_best_ref
-            global_best_candidate_img = cand_img
-            global_best_pose_name = cand_name
+        if min_dist < global_best_distance:
+            global_best_distance = float(min_dist)
+            global_best_ref_id = ref_id
+            global_best_candidate_img = candidate_imgs[best_idx]
+            global_best_pose_name = candidate_names[best_idx]
 
-        # Early Exit Strategy: If Original passes, stop.
-        if cand_name == "original" and global_best_distance <= threshold:
-            logger.debug(f"ROI {roi_id}: Early exit on original pose. Dist: {global_best_distance:.4f}")
-            break
+        # Early Exit Optimization:
+        # If "original" pose matches THIS reference very well, we can maybe stop checking other references?
+        # But we must find the BEST reference.
+        # However, if global best is good enough, maybe we stop?
+        # Current logic: stop if original pose matches *any* reference well enough?
+        # Let's keep it simple: We checked all candidates against this reference in one batch.
 
+    # Check if we found anything
     if global_best_distance == float('inf'):
         passed = False
         best_score = 0.0
     else:
         passed = bool(global_best_distance <= threshold)
-        best_score = 1.0 - global_best_distance
+        best_score = float(1.0 - global_best_distance)
 
     decision_path = "EMB_PASS" if passed else "EMB_FAIL"
     if passed and global_best_pose_name != "original":
