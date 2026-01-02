@@ -40,10 +40,10 @@ class TestMultiROIInspection(unittest.TestCase):
             "main": {"ref_main": self.ref_img}
         }
 
-    @patch("src.core.inspection._perform_hybrid_inspection")
-    def test_perform_inspection_multi_all_pass(self, mock_hybrid):
+    @patch("src.core.inspection._perform_embedding_inspection")
+    def test_perform_inspection_multi_all_pass(self, mock_embedding):
         # Setup mock return values for each ROI
-        mock_hybrid.side_effect = [
+        mock_embedding.side_effect = [
             ROIResult("roi_1", True, 0.9, "ref_a", "PASS"),
             ROIResult("roi_2", True, 0.8, "ref_b", "PASS")
         ]
@@ -61,9 +61,9 @@ class TestMultiROIInspection(unittest.TestCase):
         self.assertEqual(result.score, 0.8) # Min score
         self.assertEqual(result.decision_path, "ALL_PASS")
 
-    @patch("src.core.inspection._perform_hybrid_inspection")
-    def test_perform_inspection_multi_one_fail(self, mock_hybrid):
-        mock_hybrid.side_effect = [
+    @patch("src.core.inspection._perform_embedding_inspection")
+    def test_perform_inspection_multi_one_fail(self, mock_embedding):
+        mock_embedding.side_effect = [
             ROIResult("roi_1", True, 0.9, "ref_a", "PASS"),
             ROIResult("roi_2", False, 0.2, "ref_b", "FAIL")
         ]

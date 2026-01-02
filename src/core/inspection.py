@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 ORB_GATE_THRESHOLD = 0.50
 MISSING_STRUCTURE_RATIO_THRESHOLD = 0.03
+# For KNN Voting
+KNN_K = 3
 
 @dataclass
 class ROIResult:
@@ -375,6 +377,7 @@ def _perform_embedding_inspection(
 ) -> ROIResult:
     """
     Embedding inspection with Batched Inference & Efficient Caching.
+    Now with KNN Smoothing (k=3).
     """
     model = EmbeddingModel.get_instance()
     roi_id = roi.id
@@ -384,7 +387,6 @@ def _perform_embedding_inspection(
         return _perform_orb_inspection(captured_img, reference_images, roi, 0.75)
 
     # 1. Generate Candidates (Batch Prep)
-    # This returns list of images
     candidates_list = _generate_pose_candidates(captured_img, roi)
 
     if not candidates_list:
@@ -406,85 +408,122 @@ def _perform_embedding_inspection(
         cand_embeddings = np.expand_dims(cand_embeddings, axis=0)
 
     scores = {}
-    
+
     # Track the global best match across all poses and all references
-    global_best_distance = float('inf')
-    global_best_ref_id = "none"
-    global_best_candidate_img = None
-    global_best_pose_name = "none"
+    # But for KNN, we need to collect distances to ALL references for the "best" pose.
+    # Wait, we don't know the best pose yet.
+    # We should find the BEST pose first (lowest minimum distance to any ref),
+    # then use that pose to do KNN against all refs.
+
+    global_min_dist = float('inf')
+    global_best_pose_idx = -1
+
+    # Store all distances for the best pose found so far
+    # Or store (pose_idx, ref_id, distance) tuples?
+    # No, we want to find the pose that minimizes the distance to the "nearest neighbor".
+    # Then for THAT pose, we look at the k-nearest neighbors.
 
     # ROI Hash for Caching (x_y_w_h)
     roi_hash = f"{roi.x}_{roi.y}_{roi.w}_{roi.h}"
 
-    # 3. Compare against all references
-    # We iterate references, compute/get their embedding, and compare against ALL candidates at once
+    # Pre-calculate all reference embeddings to avoid re-calc inside candidate loop?
+    # We iterate refs anyway.
+
+    # Store ref embeddings in a list to vectorize if possible?
+    # The cache makes it fast.
+
+    # Let's collect ALL reference embeddings first.
+    ref_keys = []
+    ref_embeddings = []
+
     for ref_id, ref_img in reference_images.items():
-
-        # Unique Key including ROI geometry
         unique_ref_key = f"{roi_id}/{ref_id}/{roi_hash}"
-
-        # Pre-process reference (crop & normalize) only if not in cache
-        # We rely on get_reference_embedding to handle cache
-        # But we need to pass the "raw" reference crop for it to compute if missing
-
-        # We assume ref_img is the full/raw reference loaded from disk (or cache)
-        # We need to crop/normalize it to match candidate
         ref_roi_raw = _get_cropped_reference(ref_img, roi)
         ref_roi_norm = _apply_lighting_normalization(ref_roi_raw)
 
         emb_ref = model.get_reference_embedding(dataset_version, unique_ref_key, ref_roi_norm)
+        if emb_ref is not None:
+            ref_keys.append(ref_id)
+            ref_embeddings.append(emb_ref)
 
-        if emb_ref is None:
-            continue
+    if not ref_embeddings:
+         return ROIResult(roi_id, False, 0.0, "none", "NO_VALID_REFS")
 
-        # Compute Distances (B,) array
-        dists = model.compute_batch_distances(cand_embeddings, emb_ref)
+    # Stack refs: (R, D)
+    ref_matrix = np.array(ref_embeddings)
 
-        # Find best candidate for THIS reference
-        best_idx = np.argmin(dists)
-        min_dist = dists[best_idx]
+    # Compute Distance Matrix: Candidates (C, D) vs Refs (R, D)
+    # Cosine Distance = 1 - (A . B) / (|A| |B|)
+    # Normalize both matrices
 
-        # Record "original" pose score for reporting
-        # Original is always index 0 (as per generate_pose_candidates)
-        scores[ref_id] = float(1.0 - dists[0])
+    cand_norm = cand_embeddings / (np.linalg.norm(cand_embeddings, axis=1, keepdims=True) + 1e-8)
+    ref_norm = ref_matrix / (np.linalg.norm(ref_matrix, axis=1, keepdims=True) + 1e-8)
 
-        # Update Global Best
-        if min_dist < global_best_distance:
-            global_best_distance = float(min_dist)
-            global_best_ref_id = ref_id
-            global_best_candidate_img = candidate_imgs[best_idx]
-            global_best_pose_name = candidate_names[best_idx]
+    # Similarity (C, R)
+    sim_matrix = np.dot(cand_norm, ref_norm.T)
+    dist_matrix = 1.0 - sim_matrix
 
-        # Early Exit Optimization:
-        # If "original" pose matches THIS reference very well, we can maybe stop checking other references?
-        # But we must find the BEST reference.
-        # However, if global best is good enough, maybe we stop?
-        # Current logic: stop if original pose matches *any* reference well enough?
-        # Let's keep it simple: We checked all candidates against this reference in one batch.
+    # Find Best Pose: The one with the minimum single distance to ANY reference
+    # min over axis=1 (refs) gives min_dist per candidate
+    min_dists_per_cand = np.min(dist_matrix, axis=1)
+    best_cand_idx = np.argmin(min_dists_per_cand)
 
-    # Check if we found anything
-    if global_best_distance == float('inf'):
-        passed = False
-        best_score = 0.0
-    else:
-        passed = bool(global_best_distance <= threshold)
-        best_score = float(1.0 - global_best_distance)
+    # Now focus on this best pose
+    best_pose_dists = dist_matrix[best_cand_idx] # (R,)
 
-    decision_path = "EMB_PASS" if passed else "EMB_FAIL"
+    # Find Top K Neighbors
+    # If K > R, just take all
+    k = min(KNN_K, len(best_pose_dists))
+
+    # Indices of top k smallest distances
+    nearest_indices = np.argpartition(best_pose_dists, k-1)[:k]
+    nearest_dists = best_pose_dists[nearest_indices]
+
+    # Voting Logic:
+    # 1. Average Distance of Top K
+    avg_dist = np.mean(nearest_dists)
+
+    # 2. Or, Majority Vote (how many < threshold?)
+    # Let's stick to Average Distance as it's smoother.
+    # User asked for "Reliability" and "Smoothing".
+    # If we have 1 perfect match (0.0) and 2 bad ones (0.5, 0.5), avg is 0.33.
+    # If threshold is 0.35, it PASSES.
+    # This seems robust.
+
+    passed = bool(avg_dist <= threshold)
+
+    # Stats for result
+    # We still report the single best match for "best_reference_id"
+    best_ref_idx = np.argmin(best_pose_dists)
+    best_ref_id = ref_keys[best_ref_idx]
+    best_single_score = 1.0 - best_pose_dists[best_ref_idx]
+
+    # But the "official" score should be based on the logic used for passing
+    # Score = 1.0 - avg_dist
+    score = float(1.0 - avg_dist)
+
+    # Populate scores dict (for original pose, or best pose?)
+    # Legacy expects "scores" map. We can put dists from the best pose there.
+    for i, rid in enumerate(ref_keys):
+        scores[rid] = float(1.0 - best_pose_dists[i])
+
+    decision_path = f"KNN_{k}_PASS" if passed else f"KNN_{k}_FAIL"
+    global_best_pose_name = candidate_names[best_cand_idx]
+
     if passed and global_best_pose_name != "original":
         decision_path += f"_adjusted_{global_best_pose_name}"
 
     return ROIResult(
         roi_id=roi_id,
         passed=passed,
-        best_score=best_score,
-        best_reference_id=global_best_ref_id,
+        best_score=score, # KNN Score
+        best_reference_id=best_ref_id,
         decision_path=decision_path,
         all_scores=scores,
         heatmap=None,
         orb_passed=None,
         embedding_passed=passed,
-        best_candidate_img=global_best_candidate_img
+        best_candidate_img=candidate_imgs[best_cand_idx]
     )
 
 def _perform_hybrid_inspection(
@@ -643,7 +682,8 @@ def _dispatch_method(captured_img, refs, roi, threshold, dataset_version, method
     elif method == "ssim":
          return _perform_ssim_inspection(captured_img, refs, roi, threshold)
     else:
-         return _perform_hybrid_inspection(captured_img, refs, roi, threshold, dataset_version)
+         # Changed default from hybrid to embedding as per new strategy
+         return _perform_embedding_inspection(captured_img, refs, roi, threshold, dataset_version)
 
 def perform_inspection(
     captured_img: np.ndarray,
@@ -660,7 +700,8 @@ def perform_inspection(
     roi_results: Dict[str, ROIResult] = {}
 
     # Strategy Determination (Global env var applies to all ROIs)
-    env_method = os.environ.get("INSPECTION_METHOD", "hybrid").lower()
+    # Defaulting to 'embedding' now for stability
+    env_method = os.environ.get("INSPECTION_METHOD", "embedding").lower()
 
     for r_dict in raw_rois:
         # NORMALIZE ROI HERE

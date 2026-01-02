@@ -198,6 +198,52 @@ class DatasetManager:
             print(f"Error saving reference for {roi_id}: {e}")
             return False
 
+    def delete_reference(self, roi_id: str, ref_id: str) -> bool:
+        """
+        Deletes a specific reference image.
+        Invalidates cache.
+        """
+        refs = self.get_active_references()
+        if roi_id not in refs or ref_id not in refs[roi_id]:
+            return False
+
+        path = refs[roi_id][ref_id]
+        try:
+            os.remove(path)
+            self._image_cache = None
+            print(f"[Dataset] Deleted reference {ref_id} for ROI {roi_id}")
+            return True
+        except OSError as e:
+            print(f"[Dataset] Error deleting {path}: {e}")
+            return False
+
+    def delete_all_references_for_roi(self, roi_id: str) -> bool:
+        """
+        Deletes all references for a specific ROI (clears the folder).
+        Invalidates cache.
+        """
+        v_path = self.get_active_version_path()
+        roi_dir = os.path.join(v_path, roi_id)
+
+        # Check if exists (might be legacy root, but usually subdirectory)
+        if not os.path.exists(roi_dir) and roi_id == "digits_main":
+             # Legacy handling: clear root images? Dangerous.
+             # Assume if folder exists we delete it.
+             pass
+
+        if os.path.isdir(roi_dir):
+            try:
+                shutil.rmtree(roi_dir)
+                os.makedirs(roi_dir, exist_ok=True) # Recreate empty
+                self._image_cache = None
+                print(f"[Dataset] Cleared all references for ROI {roi_id}")
+                return True
+            except OSError as e:
+                print(f"[Dataset] Error clearing ROI {roi_id}: {e}")
+                return False
+
+        return False
+
     def clear_active_references(self):
         """
         Clears all references in the active version (files and subdirs).

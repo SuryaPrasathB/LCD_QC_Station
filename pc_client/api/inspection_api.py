@@ -157,3 +157,30 @@ class InspectionClient:
         resp = requests.post(f"{self.base_url}/datasets/select", json=payload, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    # --- Reference Management ---
+
+    def list_roi_references(self, roi_id: str) -> Dict:
+        """GET /roi/{roi_id}/references"""
+        resp = requests.get(f"{self.base_url}/roi/{roi_id}/references", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_roi_reference_image(self, roi_id: str, ref_id: str) -> bytes:
+        """GET /roi/{roi_id}/references/{ref_id}"""
+        resp = requests.get(f"{self.base_url}/roi/{roi_id}/references/{ref_id}", timeout=5.0)
+        if resp.status_code == 200:
+            return resp.content
+        return None
+
+    def delete_roi_reference(self, roi_id: str, ref_id: str) -> Dict:
+        """DELETE /roi/{roi_id}/references/{ref_id}"""
+        resp = requests.delete(f"{self.base_url}/roi/{roi_id}/references/{ref_id}", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_all_roi_references(self, roi_id: str) -> Dict:
+        """DELETE /roi/{roi_id}/references"""
+        resp = requests.delete(f"{self.base_url}/roi/{roi_id}/references", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()

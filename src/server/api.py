@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from enum import Enum
 import cv2
 import numpy as np
 import io
+import os
 
 from .state import ServerState
 from src.core.roi_model import normalize_roi
@@ -265,6 +266,86 @@ def commit_rois():
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- Reference Management API ---
+
+@app.get("/roi/{roi_id}/references")
+def list_roi_references(roi_id: str):
+    """List all reference filenames for a specific ROI."""
+    state = ServerState.get_instance()
+    refs = state.dataset_manager.get_active_references()
+
+    if roi_id not in refs:
+        # If no refs, return empty list instead of 404 to allow for UI handling
+        return {"roi_id": roi_id, "references": []}
+
+    # refs[roi_id] is a dict {ref_id: path}
+    # We return list of dicts with id and filename
+    ref_list = []
+    for ref_id, path in refs[roi_id].items():
+        ref_list.append({
+            "id": ref_id,
+            "filename": os.path.basename(path)
+        })
+
+    return {"roi_id": roi_id, "references": ref_list}
+
+@app.get("/roi/{roi_id}/references/{ref_id}")
+def get_roi_reference_image(roi_id: str, ref_id: str):
+    """Serve the actual image file for a reference."""
+    state = ServerState.get_instance()
+    refs = state.dataset_manager.get_active_references()
+
+    if roi_id not in refs:
+        raise HTTPException(status_code=404, detail="ROI not found")
+
+    if ref_id not in refs[roi_id]:
+        raise HTTPException(status_code=404, detail="Reference not found")
+
+    path = refs[roi_id][ref_id]
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    return FileResponse(path, media_type="image/png")
+
+@app.delete("/roi/{roi_id}/references/{ref_id}")
+def delete_roi_reference(roi_id: str, ref_id: str):
+    """Delete a specific reference image."""
+    state = ServerState.get_instance()
+
+    # We need to expose a delete method in DatasetManager
+    # For now, we'll implement a helper in State or access DatasetManager directly?
+    # Better to keep logic in DatasetManager.
+
+    # Let's add a quick helper here or assume we update DatasetManager in next step?
+    # The plan said "Modify src/server/api.py and src/core/dataset.py".
+    # I will update DatasetManager in the same step if possible or rely on simple os actions here (risky).
+    # Let's do it properly via DatasetManager method.
+
+    success = state.dataset_manager.delete_reference(roi_id, ref_id)
+    if not success:
+         raise HTTPException(status_code=404, detail="Reference not found or delete failed")
+
+    # Reload cache!
+    state.dataset_manager.load_all_references()
+
+    return {"status": "deleted", "roi_id": roi_id, "ref_id": ref_id}
+
+@app.delete("/roi/{roi_id}/references")
+def delete_all_roi_references(roi_id: str):
+    """Delete ALL references for an ROI."""
+    state = ServerState.get_instance()
+
+    success = state.dataset_manager.delete_all_references_for_roi(roi_id)
+    if not success:
+         raise HTTPException(status_code=404, detail="ROI not found or delete failed")
+
+    # Reload cache!
+    state.dataset_manager.load_all_references()
+
+    return {"status": "cleared_all", "roi_id": roi_id}
+
+# -------------------------------
 
 @app.post("/inspection/start")
 async def start_inspection():

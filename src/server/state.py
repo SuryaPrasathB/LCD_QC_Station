@@ -378,21 +378,31 @@ class ServerState:
              print(f"[Server] Skipped inspection {insp_id}: Busy")
              return
 
+        t_start = time.time()
         try:
             print(f"[Server] Running inspection {insp_id}")
+
+            t0 = time.time()
             capture_path = f"/tmp/insp_{insp_id}.jpg"
             self.camera.capture_still(capture_path)
+            t1 = time.time()
+            print(f"[Timer] Capture: {t1 - t0:.3f}s")
 
             img = cv2.imread(capture_path)
             if img is None:
                 raise Exception("Capture failed")
 
             # Use Cached References
+            t2 = time.time()
             refs_nested = self.dataset_manager.get_cached_references()
+            t3 = time.time()
+            if t3 - t2 > 0.01:
+                print(f"[Timer] Reference Fetch (WARNING): {t3 - t2:.3f}s")
 
             roi_data = self.roi_data
             version = self.dataset_manager.active_version
 
+            t4 = time.time()
             result = perform_inspection(
                 img,
                 refs_nested,
@@ -400,6 +410,8 @@ class ServerState:
                 0.35,
                 version
             )
+            t5 = time.time()
+            print(f"[Timer] Inspection Logic: {t5 - t4:.3f}s")
 
             # Save Record
             roi_results_dict = {}
@@ -438,7 +450,8 @@ class ServerState:
                 }
                 self.last_inspection_frame_path = final_path
 
-            print(f"[Server] Inspection {insp_id} complete. Passed: {result.passed}")
+            t_end = time.time()
+            print(f"[Server] Inspection {insp_id} complete. Passed: {result.passed}. Total: {t_end - t_start:.3f}s")
 
         except Exception as e:
             print(f"[Server] Inspection failed: {e}")

@@ -7,6 +7,7 @@ from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent, Qt
 from pc_client.api.inspection_api import InspectionClient
 from pc_client.ui.live_view import LiveView
 from pc_client.ui.results_panel import ResultsPanel
+from pc_client.ui.dialogs.reference_gallery import ReferenceGalleryDialog
 from pc_client.utils.image_utils import bytes_to_pixmap
 
 class ApiWorker(QThread):
@@ -137,6 +138,9 @@ class MainWindow(QMainWindow):
         self.btn_clear.setObjectName("danger_button")
         self.btn_clear.clicked.connect(self.clear_rois)
 
+        self.btn_manage_refs = QPushButton("Manage Refs")
+        self.btn_manage_refs.clicked.connect(self.open_reference_gallery)
+
         self.btn_commit = QPushButton("Commit Changes")
         self.btn_commit.setObjectName("action_button")
         self.btn_commit.clicked.connect(self.commit_rois)
@@ -146,7 +150,12 @@ class MainWindow(QMainWindow):
         self.btn_inspect.clicked.connect(self.start_inspection)
 
         ctrl_layout.addWidget(self.btn_setup)
-        ctrl_layout.addWidget(self.btn_clear)
+
+        row_btns = QHBoxLayout()
+        row_btns.addWidget(self.btn_clear)
+        row_btns.addWidget(self.btn_manage_refs)
+        ctrl_layout.addLayout(row_btns)
+
         ctrl_layout.addWidget(self.btn_commit)
         ctrl_layout.addSpacing(10)
         ctrl_layout.addWidget(self.btn_inspect)
@@ -322,6 +331,24 @@ class MainWindow(QMainWindow):
         print("[Client] Committing ROIs requested")
         worker = self.start_worker(self.client.commit_rois)
         worker.result_ready.connect(lambda: QMessageBox.information(self, "Info", "ROIs Committed"))
+
+    def open_reference_gallery(self):
+        # We need to know WHICH ROI to manage.
+        # For now, let's ask the user to pick an ROI ID from a list.
+        worker = self.start_worker(self.client.get_roi_list)
+        worker.result_ready.connect(self.select_roi_for_gallery)
+
+    def select_roi_for_gallery(self, rois):
+        if not rois:
+            QMessageBox.information(self, "Info", "No ROIs defined.")
+            return
+
+        roi_ids = [r["id"] for r in rois]
+        roi_id, ok = QInputDialog.getItem(self, "Manage References", "Select ROI:", roi_ids, 0, False)
+
+        if ok and roi_id:
+            dlg = ReferenceGalleryDialog(self.client, roi_id, self)
+            dlg.exec()
 
     def start_inspection(self):
         print("[Client] Start Inspection requested")
