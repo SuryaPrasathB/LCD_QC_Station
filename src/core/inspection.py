@@ -476,7 +476,9 @@ def _perform_embedding_inspection(
     k = min(KNN_K, len(best_pose_dists))
 
     # Indices of top k smallest distances
-    nearest_indices = np.argpartition(best_pose_dists, k-1)[:k]
+    # Ensure fully deterministic behavior using argsort instead of argpartition
+    sorted_indices = np.argsort(best_pose_dists)
+    nearest_indices = sorted_indices[:k]
     nearest_dists = best_pose_dists[nearest_indices]
 
     # Voting Logic:
@@ -494,7 +496,8 @@ def _perform_embedding_inspection(
 
     # Stats for result
     # We still report the single best match for "best_reference_id"
-    best_ref_idx = np.argmin(best_pose_dists)
+    # Take the deterministic best reference from the sorted indices
+    best_ref_idx = sorted_indices[0]
     best_ref_id = ref_keys[best_ref_idx]
     best_single_score = 1.0 - best_pose_dists[best_ref_idx]
 

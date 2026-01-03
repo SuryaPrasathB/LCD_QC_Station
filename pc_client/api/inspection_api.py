@@ -158,6 +158,17 @@ class InspectionClient:
         resp.raise_for_status()
         return resp.json()
 
+    def set_camera_adjustments(self, brightness: float, contrast: float, highlight: float) -> Dict:
+        """POST /camera/adjust"""
+        payload = {
+            "brightness": brightness,
+            "contrast": contrast,
+            "highlight": highlight
+        }
+        resp = requests.post(f"{self.base_url}/camera/adjust", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Reference Management ---
 
     def list_roi_references(self, roi_id: str) -> Dict:

@@ -42,3 +42,15 @@ class CameraInterface(ABC):
             output_path (str): The file path to save the image to.
         """
         pass
+
+    @abstractmethod
+    def set_adjustments(self, brightness: float, contrast: float, highlight: float) -> None:
+        """
+        Set image adjustments like brightness, contrast, and highlights.
+        
+        Args:
+            brightness (float): Brightness level.
+            contrast (float): Contrast level.
+            highlight (float): Highlight/gamma level.
+        """
+        pass

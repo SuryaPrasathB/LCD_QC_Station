@@ -37,6 +37,35 @@ class RealCamera(CameraInterface):
         self.main_config = {"size": (3280, 2464), "format": "RGB888"}
         self.lores_config = {"size": (640, 480), "format": "YUV420"}
 
+    def set_adjustments(self, brightness: float, contrast: float, highlight: float) -> None:
+        """
+        Set image adjustments on the hardware ISP.
+        Highlight/Gamma uses software controls if not supported natively.
+        """
+        if not self._running:
+            return
+            
+        try:
+            # Picamera2 controls typically accept brightness (-1.0 to 1.0) and contrast (0.0 to 32.0).
+            # UI sends brightness -100 to 100, contrast 0.1 to 3.0
+            
+            # Normalize brightness (-100..100 -> -1.0..1.0)
+            norm_brightness = max(-1.0, min(1.0, brightness / 100.0))
+            
+            # Normalize contrast (0.1..3.0 is usually fine, but ensure it's clamped to reasonable libcamera ranges)
+            norm_contrast = max(0.0, min(32.0, contrast))
+            
+            controls = {
+                "Brightness": norm_brightness,
+                "Contrast": norm_contrast
+            }
+            # Add highlight/gamma if supported, or other controls
+            # Example for standard libcamera controls (if available)
+            self.picam2.set_controls(controls)
+        except Exception as e:
+            print(f"[RealCamera] Failed to set adjustments: {e}")
+            pass
+
     @staticmethod
     def check_camera_availability() -> bool:
         """

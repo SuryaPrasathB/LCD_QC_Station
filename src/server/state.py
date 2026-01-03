@@ -93,6 +93,12 @@ class ServerState:
 
         self.camera.stop()
 
+    def set_camera_adjustments(self, brightness: float, contrast: float, highlight: float):
+        """Applies image adjustments to the camera stream."""
+        with self.lock:
+            if hasattr(self.camera, 'set_adjustments'):
+                self.camera.set_adjustments(brightness, contrast, highlight)
+
     def _frame_loop(self):
         """Continuously fetches frames for live view."""
         while self.running:

@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QMessageBox, QInputDialog,
-    QComboBox, QCheckBox, QScrollArea, QFrame, QDialog, QFormLayout
+    QComboBox, QCheckBox, QScrollArea, QFrame, QDialog, QFormLayout, QSlider
 )
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QEvent, Qt
 from pc_client.api.inspection_api import InspectionClient
@@ -116,6 +116,43 @@ class MainWindow(QMainWindow):
         self.dataset_group.setVisible(False) # Hidden until connected
         left_layout.addWidget(self.dataset_group)
 
+        # Camera Adjustments Group (Hidden by default, shown in setup mode or maybe just always available if connected)
+        self.adjustments_group = QGroupBox("Camera Adjustments")
+        adj_layout = QHBoxLayout()
+        
+        # Brightness Slider
+        adj_layout.addWidget(QLabel("Brightness:"))
+        self.slider_brightness = QSlider(Qt.Orientation.Horizontal)
+        self.slider_brightness.setRange(-100, 100)
+        self.slider_brightness.setValue(0)
+        self.slider_brightness.sliderReleased.connect(self.update_camera_adjustments)
+        adj_layout.addWidget(self.slider_brightness)
+        
+        # Contrast Slider
+        adj_layout.addWidget(QLabel("Contrast:"))
+        self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
+        self.slider_contrast.setRange(10, 300) # representing 0.1 to 3.0
+        self.slider_contrast.setValue(100) # representing 1.0
+        self.slider_contrast.sliderReleased.connect(self.update_camera_adjustments)
+        adj_layout.addWidget(self.slider_contrast)
+        
+        # Highlight Slider
+        adj_layout.addWidget(QLabel("Highlight:"))
+        self.slider_highlight = QSlider(Qt.Orientation.Horizontal)
+        self.slider_highlight.setRange(-50, 50)
+        self.slider_highlight.setValue(0)
+        self.slider_highlight.sliderReleased.connect(self.update_camera_adjustments)
+        adj_layout.addWidget(self.slider_highlight)
+        
+        # Reset button
+        self.btn_reset_adj = QPushButton("Reset")
+        self.btn_reset_adj.clicked.connect(self.reset_camera_adjustments)
+        adj_layout.addWidget(self.btn_reset_adj)
+
+        self.adjustments_group.setLayout(adj_layout)
+        self.adjustments_group.setVisible(False)
+        left_layout.addWidget(self.adjustments_group)
+
         # Live View
         self.live_view = LiveView()
         self.live_view.roi_drawn.connect(self.on_roi_drawn)
@@ -224,6 +261,7 @@ class MainWindow(QMainWindow):
     def apply_state(self, connected: bool):
         self.ctrl_group.setEnabled(connected)
         self.dataset_group.setVisible(connected)
+        self.adjustments_group.setVisible(connected)
         self.txt_ip.setEnabled(not connected)
         self.txt_port.setEnabled(not connected)
         self.results_panel.set_buttons_enabled(connected and self.current_inspection_id is not None)
@@ -296,6 +334,21 @@ class MainWindow(QMainWindow):
             self.btn_setup.setText("Exit Setup")
         else:
             self.btn_setup.setText("Setup ROI")
+
+    def update_camera_adjustments(self):
+        # Prevent spamming API too much if possible, or just send on change
+        b = float(self.slider_brightness.value())
+        c = float(self.slider_contrast.value()) / 100.0
+        h = float(self.slider_highlight.value())
+        
+        # Start worker to set adjustments silently without blocking
+        self.start_worker(self.client.set_camera_adjustments, b, c, h)
+
+    def reset_camera_adjustments(self):
+        self.slider_brightness.setValue(0)
+        self.slider_contrast.setValue(100)
+        self.slider_highlight.setValue(0)
+        self.update_camera_adjustments()
 
     def on_roi_drawn(self, x, y, w, h):
         print(f"[Client] ROI drawn: {x:.3f},{y:.3f},{w:.3f},{h:.3f}")

@@ -50,6 +50,11 @@ class DatasetSelectRequest(BaseModel):
 class ROIOverrideConfig(BaseModel):
     force_pass: bool
 
+class CameraAdjustRequest(BaseModel):
+    brightness: float
+    contrast: float
+    highlight: float
+
 # Helper to encode image
 def encode_image(img: np.ndarray) -> bytes:
     success, encoded_img = cv2.imencode('.jpg', img)
@@ -435,3 +440,9 @@ def select_dataset(req: DatasetSelectRequest):
     if not success:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return {"status": "selected", "name": req.name}
+
+@app.post("/camera/adjust")
+def adjust_camera(req: CameraAdjustRequest):
+    state = ServerState.get_instance()
+    state.set_camera_adjustments(req.brightness, req.contrast, req.highlight)
+    return {"status": "ok", "brightness": req.brightness, "contrast": req.contrast, "highlight": req.highlight}

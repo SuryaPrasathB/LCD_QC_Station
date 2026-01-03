@@ -15,6 +15,26 @@ class MockCamera(CameraInterface):
         self.interval = 1.0 / fps
         self._running = False
         self.last_frame_time = 0
+        
+        self.brightness = 0.0
+        self.contrast = 1.0
+        self.highlight = 0.0
+
+    def set_adjustments(self, brightness: float, contrast: float, highlight: float) -> None:
+        self.brightness = brightness
+        self.contrast = contrast
+        self.highlight = highlight
+
+    def _apply_adjustments(self, frame: np.ndarray) -> np.ndarray:
+        adjusted = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
+        
+        if self.highlight != 0:
+            gamma = 1.0 - (self.highlight / 100.0)
+            inv_gamma = 1.0 / gamma if gamma > 0 else 1.0
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            adjusted = cv2.LUT(adjusted, table)
+            
+        return adjusted
 
     def start(self) -> None:
         self._running = True
@@ -46,7 +66,7 @@ class MockCamera(CameraInterface):
         cv2.putText(frame, f"Time: {current_time:.2f}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (0, 255, 0), 2)
 
-        return frame
+        return self._apply_adjustments(frame)
 
     def is_running(self) -> bool:
         return self._running
@@ -67,6 +87,8 @@ class MockCamera(CameraInterface):
                     2, (0, 0, 255), 4)
         cv2.putText(img, f"Timestamp: {time.time()}", (100, 300), cv2.FONT_HERSHEY_SIMPLEX,
                     1, (255, 255, 255), 2)
+
+        img = self._apply_adjustments(img)
 
         # Save to disk
         success = cv2.imwrite(output_path, img)
