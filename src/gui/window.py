@@ -375,7 +375,8 @@ class MainWindow(QMainWindow):
                  if res:
                      status = 'pass' if res.passed else 'fail'
 
-                 rect = QRect(r_def["x"], r_def["y"], r_def["w"], r_def["h"])
+                 bbox = r_def.get("bbox", r_def)
+                 rect = QRect(bbox.get("x", 0), bbox.get("y", 0), bbox.get("w", 0), bbox.get("h", 0))
                  current_rois_ui.append({
                      'rect': rect,
                      'id': rid,
@@ -471,7 +472,8 @@ class MainWindow(QMainWindow):
         if self.cached_roi_data:
              rois = []
              for r in self.cached_roi_data.get("rois", []):
-                 rect = QRect(r["x"], r["y"], r["w"], r["h"])
+                 bbox = r.get("bbox", r)
+                 rect = QRect(bbox.get("x", 0), bbox.get("y", 0), bbox.get("w", 0), bbox.get("h", 0))
                  rois.append({'rect': rect, 'id': r["id"], 'status': 'none'})
              self.image_label.set_rois(rois)
         else:
@@ -494,10 +496,11 @@ class MainWindow(QMainWindow):
 
             rois_ui = []
             for r in roi_data.get("rois", []):
-                x = int(r["x"] * scale_x)
-                y = int(r["y"] * scale_y)
-                w = int(r["w"] * scale_x)
-                h = int(r["h"] * scale_y)
+                bbox = r.get("bbox", r)
+                x = int(bbox.get("x", 0) * scale_x)
+                y = int(bbox.get("y", 0) * scale_y)
+                w = int(bbox.get("w", 0) * scale_x)
+                h = int(bbox.get("h", 0) * scale_y)
 
                 # Check if we already have a status for this ROI in the label?
                 # Usually we overwrite with 'none' unless inspection just ran.

@@ -1,0 +1,10 @@
+[RealCamera] Started.
+[RealCamera] Capturing still to /tmp/capture.jpg...
+[RealCamera] Capture successful.
+DEBUG: Loading refs for ROI roi_1: ['ref_001']
+Inspection error: 'x'
+Traceback (most recent call last):
+  File "/home/lscs/qc_system/Jules_V1.1/LCD_QC_Station/src/gui/window.py", line 378, in run_inspection
+    rect = QRect(r_def["x"], r_def["y"], r_def["w"], r_def["h"])
+                 ~~~~~^^^^^
+KeyError: 'x'
