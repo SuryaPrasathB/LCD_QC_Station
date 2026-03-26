@@ -596,6 +596,12 @@ def inspect_roi(
 
     # 2. Semantic Validation (only if Similarity passed)
     if res.passed and res.best_reference_id != "none":
+        # Check if the score is extremely high (e.g. > 0.8), bypass semantic veto
+        if res.best_score > 0.8:
+            res.semantic_passed = True
+            logger.debug(f"ROI {roi.id} bypassed Semantic Validation due to high score: {res.best_score:.4f}")
+            return res
+
         best_ref_img = refs.get(res.best_reference_id)
 
         if best_ref_img is None:
