@@ -4,6 +4,7 @@ import os
 import cv2
 import numpy as np
 import uuid
+import tempfile
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 import asyncio
@@ -49,6 +50,10 @@ class ServerState:
         self.dataset_manager.initialize()
         self.roi_manager = ROIManager(self.dataset_manager)
 
+        # Start retention policy thread
+        self._retention_thread = threading.Thread(target=self._run_retention_policy_loop, daemon=True)
+        self._retention_thread.start()
+
         # Detect Camera
         use_mock = os.environ.get("USE_MOCK_CAMERA", "0") == "1"
         if use_mock:
@@ -92,6 +97,17 @@ class ServerState:
             self.worker_thread.join(timeout=2.0)
 
         self.camera.stop()
+
+    def _run_retention_policy_loop(self):
+        """Runs the dataset retention policy periodically in a background thread."""
+        while True:
+            try:
+                # 30 day retention policy
+                self.dataset_manager.enforce_retention_policy(days=30)
+            except Exception as e:
+                print(f"[Server] Retention policy loop error: {e}")
+            # Sleep for 24 hours
+            time.sleep(86400)
 
     def set_camera_adjustments(self, brightness: float, contrast: float, highlight: float):
         """Applies image adjustments to the camera stream."""
@@ -224,8 +240,10 @@ class ServerState:
         if not self.inspection_lock.acquire(blocking=False):
             raise Exception("System busy with inspection")
 
+        capture_path = None
+        tmp_crops = []
         try:
-            capture_path = f"/tmp/setup_capture_{uuid.uuid4().hex}.jpg"
+            capture_path = os.path.join(tempfile.gettempdir(), f"setup_capture_{uuid.uuid4().hex}.jpg")
 
             # Capture synchronously (blocking but okay for setup)
             self.camera.capture_still(capture_path)
@@ -252,9 +270,10 @@ class ServerState:
                     continue
 
                 crop = img[y:y+h, x:x+w]
-                tmp_crop = f"/tmp/ref_{roi.id}.png"
+                tmp_crop = os.path.join(tempfile.gettempdir(), f"ref_{roi.id}.png")
                 cv2.imwrite(tmp_crop, crop)
                 self.dataset_manager.save_roi_reference(roi.id, tmp_crop)
+                tmp_crops.append(tmp_crop)
 
             return {
                 "status": "committed",
@@ -263,6 +282,14 @@ class ServerState:
             }
         finally:
             self.inspection_lock.release()
+            # Cleanup temp files
+            if capture_path and os.path.exists(capture_path):
+                try: os.remove(capture_path)
+                except Exception: pass
+            for tc in tmp_crops:
+                if os.path.exists(tc):
+                    try: os.remove(tc)
+                    except Exception: pass
 
     def override_inspection(self, inspection_id: str, action: str, roi_id: Optional[str] = None):
         """
@@ -385,11 +412,12 @@ class ServerState:
              return
 
         t_start = time.time()
+        capture_path = None
         try:
             print(f"[Server] Running inspection {insp_id}")
 
             t0 = time.time()
-            capture_path = f"/tmp/insp_{insp_id}.jpg"
+            capture_path = os.path.join(tempfile.gettempdir(), f"insp_{insp_id}.jpg")
             self.camera.capture_still(capture_path)
             t1 = time.time()
             print(f"[Timer] Capture: {t1 - t0:.3f}s")
@@ -471,3 +499,7 @@ class ServerState:
                 }
         finally:
             self.inspection_lock.release()
+            # Cleanup temporary file
+            if capture_path and os.path.exists(capture_path):
+                try: os.remove(capture_path)
+                except Exception: pass

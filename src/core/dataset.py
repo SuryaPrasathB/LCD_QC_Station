@@ -308,6 +308,28 @@ class DatasetManager:
 
         return final_image_path
 
+    def enforce_retention_policy(self, days: int = 30):
+        """
+        Deletes inspection images and results older than the specified number of days.
+        """
+        import time
+        now = time.time()
+        retention_seconds = days * 86400
+        cutoff_time = now - retention_seconds
+        
+        try:
+            for filename in os.listdir(self.inspections_path):
+                filepath = os.path.join(self.inspections_path, filename)
+                if os.path.isfile(filepath):
+                    file_mtime = os.path.getmtime(filepath)
+                    if file_mtime < cutoff_time:
+                        try:
+                            os.remove(filepath)
+                        except Exception as e:
+                            print(f"Failed to delete old inspection file {filepath}: {e}")
+        except Exception as e:
+            print(f"Error running retention policy on {self.inspections_path}: {e}")
+
     def save_override(self, record: OverrideRecord):
         """
         Saves override record and adds to pending pool if applicable.
