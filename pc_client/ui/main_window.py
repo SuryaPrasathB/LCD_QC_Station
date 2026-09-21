@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         conn_group = QGroupBox("Connection")
         conn_layout = QHBoxLayout()
 
-        self.txt_ip = QLineEdit("127.0.0.1")
+        self.txt_ip = QLineEdit("192.168.0.10")
         self.txt_ip.setPlaceholderText("IP Address")
         self.txt_port = QLineEdit("8000")
         self.txt_port.setPlaceholderText("Port")
